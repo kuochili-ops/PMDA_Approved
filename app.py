@@ -4,25 +4,15 @@ import json
 import time
 import requests
 import io
+import re
 
-# --- 配置 (Configuration) ---
-# 在 Canvas 環境中，API Key 會被自動提供並在請求標頭中注入。
-# 因此，API URL 應不包含 'key=' 參數，以依賴環境的認證。
-MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
-# 修正 API URL，不包含 key 參數，完全依賴環境認證。
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent" 
-
-
+# --- 配置 ---
+MODEL_NAME = "gemini-1.5-flash"  # 改成穩定可用的模型
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
 def translate_drug_info(japanese_data_list):
-    """
-    使用 Gemini API 翻譯藥品資訊列表，並要求結構化的 JSON 輸出。
-    """
+    """使用 Gemini API 翻譯藥品資訊列表，並要求結構化 JSON 輸出。"""
     if not japanese_data_list:
         return []
-
-    # 限制 API 呼叫的資料量，避免超出上下文視窗
-    # For large lists, translating in batches is safer, but for typical lists, one call is efficient.
-    # We will process one file (one list) at a time, which is usually safe.
 
     system_prompt = (
         "You are an expert pharmaceutical translator. Translate the provided Japanese drug information "
@@ -31,7 +21,6 @@ def translate_drug_info(japanese_data_list):
         "The translation must be accurate and concise."
     )
 
-    # 將要翻譯的資料格式化為單一字串
     data_to_translate = "\n---\n".join([
         f"Trade Name (JP): {item['trade_name_jp']}\nIngredient (JP): {item['ingredient_jp']}\nEfficacy (JP): {item['efficacy_jp']}"
         for item in japanese_data_list
@@ -39,23 +28,22 @@ def translate_drug_info(japanese_data_list):
 
     user_query = f"Translate the following Japanese drug entries. Respond ONLY with the JSON array.\n\n{data_to_translate}"
 
-    # 定義結構化 JSON 輸出格式
     response_schema = {
         "type": "ARRAY",
         "items": {
             "type": "OBJECT",
             "properties": {
-                "trade_name_zh": {"type": "STRING", "description": "Traditional Chinese translation of the trade name and company."},
-                "trade_name_en": {"type": "STRING", "description": "English translation of the trade name and company."},
-                "ingredient_zh": {"type": "STRING", "description": "Traditional Chinese translation of the ingredient name."},
-                "ingredient_en": {"type": "STRING", "description": "English translation of the ingredient name."},
-                "efficacy_zh": {"type": "STRING", "description": "Traditional Chinese translation of the efficacy and effects."},
-                "efficacy_en": {"type": "STRING", "description": "English translation of the efficacy and effects."}
+                "trade_name_zh": {"type": "STRING"},
+                "trade_name_en": {"type": "STRING"},
+                "ingredient_zh": {"type": "STRING"},
+                "ingredient_en": {"type": "STRING"},
+                "efficacy_zh": {"type": "STRING"},
+                "efficacy_en": {"type": "STRING"}
             },
             "required": ["trade_name_zh", "trade_name_en", "ingredient_zh", "ingredient_en", "efficacy_zh", "efficacy_en"]
         }
     }
-    
+
     payload = {
         "contents": [{"parts": [{"text": user_query}]}],
         "systemInstruction": {"parts": [{"text": system_prompt}]},
@@ -64,44 +52,32 @@ def translate_drug_info(japanese_data_list):
             "responseSchema": response_schema
         }
     }
-    
-    response = None # 初始化 response 變數
-    # 實作指數退避 (Exponential Backoff) 處理 API 呼叫失敗
+
+    response = None
     max_retries = 5
     for attempt in range(max_retries):
         try:
-            # 確保使用 Content-Type header
             response = requests.post(
                 API_URL,
                 headers={'Content-Type': 'application/json'},
                 data=json.dumps(payload),
-                timeout=60 # 給予足夠的 API 執行時間
+                timeout=60
             )
-            response.raise_for_status() # 檢查 HTTP 狀態碼
-            
+            response.raise_for_status()
             result = response.json()
-            
-            # 從結果中提取 JSON 字串
             json_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
-            
             if json_text:
                 return json.loads(json_text)
-            
             st.error("API 回應成功，但未找到預期的 JSON 翻譯結果。")
             return None
-
         except requests.exceptions.RequestException as e:
-            # 偵測 403 錯誤，這是授權失敗的明確指示
             if response is not None and response.status_code == 403:
-                # 再次強調這是環境或權限問題
-                st.error("API 呼叫失敗：403 Forbidden (權限不足)。這**不是程式碼邏輯**錯誤，而是**Streamlit/Canvas 環境中的 API 金鑰或模型存取權限**問題。請聯繫平台支援。")
+                st.error("API 呼叫失敗：403 Forbidden。請確認模型授權。")
                 return None
-            
             if attempt < max_retries - 1:
-                wait_time = 2 ** attempt # 1s, 2s, 4s, 8s...
-                time.sleep(wait_time)
+                time.sleep(2 ** attempt)
             else:
-                st.error(f"經過 {max_retries} 次嘗試後，API 呼叫仍失敗。錯誤: {e}")
+                st.error(f"API 呼叫失敗: {e}")
                 return None
         except json.JSONDecodeError:
             st.error("翻譯結果格式錯誤，無法解析 JSON。")
@@ -109,86 +85,56 @@ def translate_drug_info(japanese_data_list):
         except Exception as e:
             st.error(f"翻譯過程中發生意外錯誤: {e}")
             return None
-            
     return None
-
-
 def process_uploaded_file(uploaded_file):
-    """
-    讀取 CSV 或 XLSX 檔案，清理資料，並識別月份名稱。
-    """
+    """讀取 CSV/XLSX 檔案，清理資料。"""
     try:
-        # 1. 識別月份名稱
         filename = uploaded_file.name
-        # 嘗試從檔名中提取月份，例如 '承認品目5月分.csv' -> '5月分'
-        month_name_match = filename.split('承認品目')[-1].replace('.csv', '').replace('.xlsx - ', '').replace('.xlsx', '')
-        month_name = month_name_match.strip() if month_name_match.strip() else "未知月份"
-        
-        # 2. 讀取檔案
         file_type = uploaded_file.type
-        filename_lower = uploaded_file.name.lower()
-        
-        # 根據 PMDA 檔案結構，跳過前 2 行標頭 (skiprows=2)
+        filename_lower = filename.lower()
+
         if 'excel' in file_type or filename_lower.endswith(('.xlsx', '.xls')):
-            # 讀取 Excel 檔案
-            # 將上傳的檔案物件直接傳遞給 read_excel
             df = pd.read_excel(uploaded_file, sheet_name=0, skiprows=2)
         elif 'csv' in file_type or filename_lower.endswith('.csv'):
-            # 讀取 CSV 檔案
-            # 必須使用 io.StringIO 處理 Streamlit 的上傳物件的內容
             csv_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
             df = pd.read_csv(csv_data, skiprows=2)
         else:
-            st.error("不支援的檔案格式。請上傳 CSV 或 XLSX 檔案。")
-            return None, None
+            st.error("不支援的檔案格式。")
+            return None
 
-
-        # 3. 清理與重命名欄位
-        # 關鍵修正: 使用正則表達式去除所有空格 (半形\s、全形　) 和換行符號\n，以確保正確匹配日文欄位名稱。
+        # 清理欄位名稱
         df.columns = df.columns.str.replace(r'[\s\n　]', '', regex=True)
-        
-        japanese_cols = {
-            # 修正鍵名: 確保與清理後的日文 PMDA 欄位名稱完全匹配
-            '販売名(会社名、法人番号)': 'Trade_Name_JP', 
-            '成分名(下線:新有効成分)': 'Ingredient_JP',
-            '効能・効果等': 'Efficacy_JP',
-            '承認日': 'Approval_Date',
-            '分野': 'Category',
-            'No.': 'No',
-            '承認': 'Approval_Type'
-        }
-        
-        # 檢查欄位是否存在後才進行重命名
-        cols_to_rename = {k: v for k, v in japanese_cols.items() if k in df.columns}
-        
-        # 修正檢查條件: 確保所有預期的欄位都存在
-        required_keys = japanese_cols.keys()
-        if not all(k in df.columns for k in required_keys): 
-             # 增加更詳細的錯誤訊息，指出缺少哪些欄位
-             missing_cols = [k for k in required_keys if k not in df.columns]
-             st.error(f"錯誤: 檔案標頭結構與預期的 PMDA 列表不符。缺少以下欄位 (日文原名，已清除空格): {', '.join(missing_cols)}")
-             return None, None
 
-        df = df.rename(columns=cols_to_rename)
-        
-        # 4. 篩選關鍵欄位並清理空行
+        # 正則化欄位對應
+        rename_map = {}
+        for col in df.columns:
+            if re.match(r'^販.*売.*名.*', col):
+                rename_map[col] = 'Trade_Name_JP'
+            elif re.match(r'^成.*分.*名.*', col):
+                rename_map[col] = 'Ingredient_JP'
+            elif re.match(r'^効能.*効果.*', col):
+                rename_map[col] = 'Efficacy_JP'
+            elif col == '承認日':
+                rename_map[col] = 'Approval_Date'
+            elif col == '分野':
+                rename_map[col] = 'Category'
+            elif col.startswith('No'):
+                rename_map[col] = 'No'
+            elif col.startswith('承認'):
+                rename_map[col] = 'Approval_Type'
+
+        df = df.rename(columns=rename_map)
+
+        # 篩選關鍵欄位
         key_cols = ['Category', 'Approval_Date', 'No', 'Trade_Name_JP', 'Approval_Type', 'Ingredient_JP', 'Efficacy_JP']
-        # 由於上一步已經檢查並重命名，這一步應該不會缺少欄位
-        
         df = df[key_cols].dropna(subset=['Trade_Name_JP', 'Ingredient_JP', 'Efficacy_JP'], how='all').reset_index(drop=True)
-        
-        return month_name, df
 
+        return df
     except Exception as e:
-        # 針對讀取 Excel/CSV 檔案本身的錯誤進行報告
-        st.error(f"處理檔案 **{uploaded_file.name}** 時發生錯誤。請確認檔案是正確的 PMDA 列表格式 (CSV 或 XLSX)。錯誤訊息: {e}")
-        return None, None
-    
-    
+        st.error(f"處理檔案 {uploaded_file.name} 時發生錯誤: {e}")
+        return None
 def translate_and_combine(df):
-    """呼叫翻譯函式並將結果合併回 DataFrame。"""
-    
-    # 準備翻譯資料
+    """翻譯並合併結果。"""
     data_for_translation = df.apply(
         lambda row: {
             'trade_name_jp': row['Trade_Name_JP'],
@@ -199,30 +145,19 @@ def translate_and_combine(df):
     ).tolist()
 
     st.info(f"正在翻譯 {len(data_for_translation)} 筆藥品資料...")
-    
     translated_results = translate_drug_info(data_for_translation)
-    
-    if translated_results is None:
-        return None
-    
-    # 檢查結果數量是否匹配
-    if len(translated_results) != len(df):
-        st.warning(f"翻譯結果數量 ({len(translated_results)}) 與原始資料數量 ({len(df)}) 不符。請重試或檢查原始資料。")
-        return None
-        
-    # 合併資料
+
+    if translated_results is None or len(translated_results) != len(df):
+        st.warning("批次翻譯數量不一致，改用逐筆翻譯。")
+        translated_results = []
+        for item in data_for_translation:
+            res = translate_drug_info([item])
+            if res:
+                translated_results.append(res[0])
+
     df_translated = pd.DataFrame(translated_results)
     final_df = pd.concat([df.reset_index(drop=True), df_translated.reset_index(drop=True)], axis=1)
 
-    # 重新排序和命名欄位以供顯示
-    final_cols = [
-        'Category', 'Approval_Date', 'No', 
-        'Trade_Name_JP', 'trade_name_zh', 'trade_name_en',
-        'Ingredient_JP', 'ingredient_zh', 'ingredient_en',
-        'Approval_Type',
-        'Efficacy_JP', 'efficacy_zh', 'efficacy_en'
-    ]
-    
     display_names = {
         'Category': '分野 (Category)',
         'Approval_Date': '承認日',
@@ -238,133 +173,35 @@ def translate_and_combine(df):
         'efficacy_zh': '功效・效果 (中文)',
         'efficacy_en': 'Efficacy/Effects (English)'
     }
-    
-    final_df = final_df[final_cols].rename(columns=display_names)
-    
+    final_df = final_df.rename(columns=display_names)
     return final_df
-
-# --- Streamlit 應用程式主體 ---
-
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
-    
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器")
-    st.markdown("請上傳從 [PMDA 網站](https://www.pmda.go.jp/review-services/drug-reviews/review-information/p-drugs/0039.html) 下載的新藥承認品目列表檔案。")
-    st.markdown("程式將自動讀取、清理，並使用 **Gemini API** 將藥品資訊翻譯為**中文 (繁體)** 及 **英文**。")
 
-    # 初始化 Session State 來儲存已處理的資料
-    if 'processed_data' not in st.session_state:
-        st.session_state.processed_data = {}
-
-    # 1. 檔案上傳 (更新以支援 XLSX)
     uploaded_files = st.file_uploader(
-        "選擇多個月份的新藥列表檔案 (支援 CSV 或 XLSX 格式)",
-        type=['csv', 'xlsx', 'xls'],
+        "上傳新藥列表檔案 (CSV/XLSX)", 
+        type=['csv', 'xlsx', 'xls'], 
         accept_multiple_files=True
     )
-    
+
     if uploaded_files:
-        
-        # 檢查是否有新檔案需要處理
-        files_to_process = [
-            f for f in uploaded_files 
-            if f.name not in st.session_state.processed_data 
-            or st.session_state.processed_data[f.name].get('needs_reprocess', False)
-        ]
-        
-        if files_to_process:
-            
-            # 使用進度條顯示處理狀態
-            processing_bar = st.progress(0, text="準備開始處理檔案...")
-            
-            for i, uploaded_file in enumerate(files_to_process):
-                processing_bar.progress((i) / len(files_to_process), text=f"處理並翻譯中: **{uploaded_file.name}**")
-                
-                # 清理檔案名稱以供顯示和儲存
-                month_name, df = process_uploaded_file(uploaded_file)
-                
-                if df is not None:
-                    # 翻譯資料
-                    translated_df = translate_and_combine(df)
-                    
-                    if translated_df is not None:
-                        # 儲存成功的結果
-                        st.session_state.processed_data[uploaded_file.name] = {
-                            'month_name': month_name,
-                            'df': translated_df,
-                            'error': False,
-                            'needs_reprocess': False
-                        }
-                    else:
-                        # 儲存翻譯失敗的標記
-                        # 由於 403 錯誤已經被 translate_drug_info 處理並顯示，這裡直接記錄錯誤
-                        st.session_state.processed_data[uploaded_file.name] = {
-                            'month_name': month_name,
-                            'df': None,
-                            'error': True,
-                            'needs_reprocess': False
-                        }
-                else:
-                    # 儲存處理失敗的標記
-                    st.session_state.processed_data[uploaded_file.name] = {
-                        'month_name': "未知月份",
-                        'df': None,
-                        'error': True,
-                        'needs_reprocess': False
-                    }
+        for uploaded_file in uploaded_files:
+            df = process_uploaded_file(uploaded_file)
+            if df is not None:
+                translated_df = translate_and_combine(df)
+                if translated_df is not None:
+                    st.subheader(f"翻譯結果：{uploaded_file.name}")
+                    st.dataframe(translated_df, use_container_width=True, hide_index=True)
 
-            processing_bar.progress(1.0, text="所有檔案處理完畢！")
-            time.sleep(1)
-            processing_bar.empty()
-            # 只有在沒有 API 錯誤發生的情況下才顯示成功
-            has_api_error = any(v.get('error') for v in st.session_state.processed_data.values())
-            if not has_api_error:
-                 st.success("所有新檔案處理完畢！")
-
-
-        # 2. 結果顯示 (使用 Tab)
-        
-        # 過濾出成功處理的檔案
-        successful_files = {k: v for k, v in st.session_state.processed_data.items() if v['df'] is not None}
-        
-        if successful_files:
-            # 建立分頁名稱列表
-            tab_names = [data['month_name'] for data in successful_files.values()]
-            
-            # 建立分頁
-            tabs = st.tabs(tab_names)
-            
-            # 顯示每個分頁的內容
-            for i, (filename, data) in enumerate(successful_files.items()):
-                month_name = data['month_name']
-                df = data['df']
-                
-                with tabs[i]:
-                    st.header(f"新藥承認品目列表：{month_name}")
-                    st.subheader("已翻譯結果 (中文/英文)")
-                    
-                    # 顯示可互動的表格
-                    st.dataframe(df, use_container_width=True, hide_index=True)
-                    
-                    # 3. 下載按鈕
-                    # 必須確保 DataFrame 存在
-                    csv_export = df.to_csv(index=False).encode('utf-8')
+                    # 提供下載按鈕
+                    csv_export = translated_df.to_csv(index=False).encode('utf-8')
                     st.download_button(
-                        label=f"📥 下載 {month_name} 翻譯列表 (CSV)",
+                        label=f"📥 下載翻譯結果 ({uploaded_file.name})",
                         data=csv_export,
-                        file_name=f"PMDA_Approval_List_{month_name}_Translated.csv",
+                        file_name=f"{uploaded_file.name}_Translated.csv",
                         mime='text/csv'
                     )
-        
-        # 4. 處理失敗檔案的提示
-        failed_files = {k: v for k, v in st.session_state.processed_data.items() if v.get('error') and v['df'] is None}
-        if failed_files:
-            # 顯示更詳細的錯誤提示
-            st.error("以下檔案處理或翻譯失敗，請檢查錯誤訊息：")
-            for filename in failed_files.keys():
-                st.write(f"- {filename} (請查看詳細錯誤提示)")
-            st.markdown("如果錯誤持續顯示 **403 Forbidden**，請聯繫平台支援以檢查 API 權限。")
-
 
 if __name__ == "__main__":
     main()
