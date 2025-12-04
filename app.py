@@ -7,13 +7,30 @@ st.title("PMDA新藥品目中英文對照表產生器")
 
 uploaded_file = st.file_uploader("請上傳 Excel 檔案", type=["xlsx"])
 if uploaded_file is not None:
-    # 讀取 Excel 檔案
-    xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
-    sheet_names = xls.sheet_names
-    # 讓使用者選擇分頁（月份）
-    target_sheet = st.selectbox("請選擇月份分頁", sheet_names)
-    df = pd.read_excel(uploaded_file, sheet_name=target_sheet, header=2, engine="openpyxl")
-    st.write("原始欄位名稱：", df.columns.tolist())
+    # 讀取 Excel 檔案（自動抓第一個工作表）
+    df = pd.read_excel(uploaded_file, dtype=str)
+    # 清理全空白列
+    df = df.dropna(how='all')
+    # 只保留有「承認日 Approval Date」的資料列
+    if '承認日 Approval Date' in df.columns:
+        df = df[df['承認日 Approval Date'].notna()]
+    # 預覽資料
+    st.dataframe(df)
+
+    # 產生 Excel 檔案 bytes
+    output = io.BytesIO()
+    # 注意：encoding 參數在 to_excel 不需要，移除避免錯誤
+    df.to_excel(output, index=False)
+    output.seek(0)
+
+    st.download_button(
+        label="下載中英文對照表 Excel",
+        data=output,
+        file_name="新藥中英文對照.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+else:
+    st.warning("請先上傳檔案！")
 
     # 欄位清理
     def clean_col(col):
