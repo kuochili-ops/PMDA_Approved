@@ -7,7 +7,22 @@ st.title("日本新藥與台灣未註銷藥品主成分比對工具")
 
 jp_file = st.file_uploader("請上傳日本上市新藥一覽表（Excel）", type=["xlsx"])
 
-# 這裡可建立藥商、主成分、用途的對照表或串接API
+# 藥品類別翻譯字典
+category_dict = {
+    "抗悪": "抗癌藥",
+    "ワクチン": "疫苗",
+    "血液": "血液製劑",
+    "バイオ": "生物製劑",
+    "放射": "放射性藥品",
+    "一般": "一般藥品",
+    "希少疾病用医薬品": "罕見疾病用藥"
+}
+# 核可狀態翻譯字典
+approval_dict = {
+    "承認": "新藥核准",
+    "一変": "部分變更核准"
+}
+# 可擴充藥商、主成分、用途的對照表或串接API
 company_dict = {
     "あすか製薬㈱": "Aska Pharmaceutical",
     "ノバルティスファーマ㈱": "Novartis Pharma",
@@ -28,21 +43,29 @@ def parse_japan_excel(file):
     xls = pd.ExcelFile(file)
     all_rows = []
     for sheet in xls.sheet_names:
-        # 跳過前兩列，header=2
-        df = pd.read_excel(xls, sheet, header=2)
+        try:
+            df = pd.read_excel(xls, sheet, header=2)
+        except Exception as e:
+            st.warning(f"{sheet} 分頁讀取失敗：{e}")
+            continue
         # 欄位標準化
         df = df.rename(columns={
             "分野": "藥品類別",
             "承認日": "核准日",
             "No.": "項次編號",
             "販　　売　　名 (　会　社　名、　法　人　番　号)": "商品名與藥商",
-            "承認": "承認狀態",
+            "承認": "核可狀態",
             "成  分  名 (下線:新有効成分)": "主成分",
             "効能・効果等": "用途"
         })
+        # 清理空白列
+        df = df.dropna(how='all')
         for i, row in df.iterrows():
-            # 商品名與藥商分開
             prod_info = str(row.get("商品名與藥商", ""))
+            ingr_jp = str(row.get("主成分", "")).strip()
+            if not prod_info or not ingr_jp:
+                continue  # 跳過空資料
+            # 商品名與藥商分開
             if "（" in prod_info:
                 prod_name = prod_info.split("（")[0].strip()
                 company_jp = prod_info.split("（")[-1].replace("）", "").strip()
@@ -50,21 +73,25 @@ def parse_japan_excel(file):
                 prod_name = prod_info
                 company_jp = ""
             # 主成分轉英文
-            ingr_jp = str(row.get("主成分", "")).replace("（下線:新有効成分）", "").strip()
             ingr_en = ingredient_dict.get(ingr_jp, ingr_jp)
             # 藥商轉英文
             company_en = company_dict.get(company_jp, company_jp)
             # 用途轉中文
             indication_jp = str(row.get("用途", "")).strip()
             indication_zh = indication_dict.get(indication_jp, indication_jp)
+            # 藥品類別翻譯
+            category_zh = category_dict.get(row.get("藥品類別", ""), row.get("藥品類別", ""))
+            # 核可狀態翻譯
+            approval_zh = approval_dict.get(row.get("核可狀態", ""), row.get("核可狀態", ""))
             all_rows.append({
-                "藥品類別": row.get("藥品類別", ""),
+                "月份": sheet,
+                "藥品類別": category_zh,
                 "核准日": row.get("核准日", ""),
                 "商品名": prod_name,  # 保留片假名
                 "藥商": company_en,   # 中文或英文
                 "主成分": ingr_en,    # 英文或中文
                 "用途": indication_zh, # 中文或英文簡介
-                "承認狀態": row.get("承認狀態", ""),
+                "核可狀態": approval_zh,
             })
     return pd.DataFrame(all_rows)
 
@@ -88,7 +115,7 @@ if jp_file:
                     "日本核准日": row["核准日"],
                     "日本用途": row["用途"],
                     "日本藥商": row["藥商"],
-                    "日本承認狀態": row["承認狀態"],
+                    "日本核可狀態": row["核可狀態"],
                     "台灣商品名": tw_row.get("商品名", ""),
                     "台灣主成分": tw_row.get("主成分", ""),
                     "台灣劑型/規格": tw_row.get("劑型/規格", ""),
@@ -102,7 +129,7 @@ if jp_file:
                 "日本核准日": row["核准日"],
                 "日本用途": row["用途"],
                 "日本藥商": row["藥商"],
-                "日本承認狀態": row["承認狀態"],
+                "日本核可狀態": row["核可狀態"],
                 "台灣商品名": "無上市品項",
                 "台灣主成分": "",
                 "台灣劑型/規格": "",
