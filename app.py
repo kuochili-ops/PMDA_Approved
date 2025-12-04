@@ -3,22 +3,7 @@ import pandas as pd
 import requests
 import io
 import re
-#
-import requests, streamlit as st
 
-endpoint = "https://api.cognitive.microsofttranslator.com/translate"
-params = {"api-version": "3.0", "from": "ja", "to": ["zh-Hant", "en"]}
-headers = {
-    "Ocp-Apim-Subscription-Key": st.secrets["AZURE_KEY"],
-    "Ocp-Apim-Subscription-Region": st.secrets["AZURE_REGION"],
-    "Content-type": "application/json"
-}
-body = [{"text": "ドロスピレノン"}]
-
-response = requests.post(endpoint, params=params, headers=headers, json=body)
-st.write(response.json())
-
-#
 # 從 Streamlit Cloud Secrets Manager 讀取金鑰
 AZURE_KEY = st.secrets["AZURE_KEY"]
 AZURE_REGION = st.secrets["AZURE_REGION"]
@@ -61,10 +46,8 @@ def process_uploaded_file(uploaded_file):
             st.error("不支援的檔案格式。")
             return None
 
-        # 清理欄位名稱
         df.columns = df.columns.str.replace(r'[\s\n　]', '', regex=True)
 
-        # 正則化欄位對應
         rename_map = {}
         for col in df.columns:
             if re.match(r'^販.*売.*名.*', col):
