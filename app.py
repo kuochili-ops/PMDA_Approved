@@ -39,7 +39,7 @@ def translate_drug_info(japanese_data_list):
 
     user_query = f"Translate the following Japanese drug entries. Respond ONLY with the JSON array.\n\n{data_to_translate}"
 
-    # 定義結構化 JSON 輸出格式 (已修正 'trade_name_en' 的 'type' 錯誤)
+    # 定義結構化 JSON 輸出格式
     response_schema = {
         "type": "ARRAY",
         "items": {
@@ -107,7 +107,7 @@ def translate_drug_info(japanese_data_list):
 
 def process_uploaded_file(uploaded_file):
     """
-    讀取 CSV 檔案，清理資料，並識別月份名稱。
+    讀取 CSV 或 XLSX 檔案，清理資料，並識別月份名稱。
     """
     try:
         # 1. 識別月份名稱
@@ -116,11 +116,24 @@ def process_uploaded_file(uploaded_file):
         month_name_match = filename.split('承認品目')[-1].replace('.csv', '').replace('.xlsx - ', '')
         month_name = month_name_match.strip() if month_name_match.strip() else "未知月份"
         
-        # 2. 讀取 CSV
-        csv_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+        # 2. 讀取檔案
+        file_type = uploaded_file.type
+        filename_lower = uploaded_file.name.lower()
         
-        # 根據 PMDA 檔案結構，跳過前 2 行標頭
-        df = pd.read_csv(csv_data, skiprows=2)
+        # 根據 PMDA 檔案結構，跳過前 2 行標頭 (skiprows=2)
+        if 'excel' in file_type or filename_lower.endswith(('.xlsx', '.xls')):
+            # 讀取 Excel 檔案
+            # 將上傳的檔案物件直接傳遞給 read_excel
+            df = pd.read_excel(uploaded_file, sheet_name=0, skiprows=2)
+        elif 'csv' in file_type or filename_lower.endswith('.csv'):
+            # 讀取 CSV 檔案
+            # 必須使用 io.StringIO 處理 Streamlit 的上傳物件的內容
+            csv_data = io.StringIO(uploaded_file.getvalue().decode("utf-8"))
+            df = pd.read_csv(csv_data, skiprows=2)
+        else:
+            st.error("不支援的檔案格式。請上傳 CSV 或 XLSX 檔案。")
+            return None, None
+
 
         # 3. 清理與重命名欄位
         df.columns = df.columns.str.replace(r'\s+|\n', '', regex=True)
@@ -144,7 +157,7 @@ def process_uploaded_file(uploaded_file):
         return month_name, df
 
     except Exception as e:
-        st.error(f"處理檔案 **{uploaded_file.name}** 時發生錯誤。請確認檔案是正確的 CSV 格式。錯誤訊息: {e}")
+        st.error(f"處理檔案 **{uploaded_file.name}** 時發生錯誤。請確認檔案是正確的 PMDA 列表格式 (CSV 或 XLSX)。錯誤訊息: {e}")
         return None, None
     
     
@@ -212,17 +225,17 @@ def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
     
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器")
-    st.markdown("請上傳從 [PMDA 網站](https://www.pmda.go.jp/review-services/drug-reviews/review-information/p-drugs/0039.html) 下載的新藥承認品目列表 CSV 檔案。")
+    st.markdown("請上傳從 [PMDA 網站](https://www.pmda.go.jp/review-services/drug-reviews/review-information/p-drugs/0039.html) 下載的新藥承認品目列表檔案。")
     st.markdown("程式將自動讀取、清理，並使用 **Gemini API** 將藥品資訊翻譯為**中文 (繁體)** 及 **英文**。")
 
     # 初始化 Session State 來儲存已處理的資料
     if 'processed_data' not in st.session_state:
         st.session_state.processed_data = {}
 
-    # 1. 檔案上傳
+    # 1. 檔案上傳 (更新以支援 XLSX)
     uploaded_files = st.file_uploader(
-        "選擇多個月份的新藥列表檔案 (CSV 格式)",
-        type=['csv'],
+        "選擇多個月份的新藥列表檔案 (支援 CSV 或 XLSX 格式)",
+        type=['csv', 'xlsx', 'xls'],
         accept_multiple_files=True
     )
     
@@ -320,7 +333,7 @@ def main():
             st.error("以下檔案處理或翻譯失敗：")
             for filename in failed_files.keys():
                 st.write(f"- {filename}")
-            st.markdown("請確認檔案為標準 CSV 格式，且內容符合 PMDA 列表結構。")
+            st.markdown("請確認檔案為標準 PMDA 列表格式，且內容符合預期結構。")
 
 
 if __name__ == "__main__":
