@@ -39,14 +39,14 @@ def translate_drug_info(japanese_data_list):
 
     user_query = f"Translate the following Japanese drug entries. Respond ONLY with the JSON array.\n\n{data_to_translate}"
 
-    # 定義結構化 JSON 輸出格式
+    # 定義結構化 JSON 輸出格式 (已修正 'trade_name_en' 的 'type' 錯誤)
     response_schema = {
         "type": "ARRAY",
         "items": {
             "type": "OBJECT",
             "properties": {
                 "trade_name_zh": {"type": "STRING", "description": "Traditional Chinese translation of the trade name and company."},
-                "trade_name_en": {"type: "STRING", "description": "English translation of the trade name and company."},
+                "trade_name_en": {"type": "STRING", "description": "English translation of the trade name and company."},
                 "ingredient_zh": {"type": "STRING", "description": "Traditional Chinese translation of the ingredient name."},
                 "ingredient_en": {"type": "STRING", "description": "English translation of the ingredient name."},
                 "efficacy_zh": {"type": "STRING", "description": "Traditional Chinese translation of the efficacy and effects."},
