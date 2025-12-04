@@ -113,7 +113,7 @@ def process_uploaded_file(uploaded_file):
         # 1. 識別月份名稱
         filename = uploaded_file.name
         # 嘗試從檔名中提取月份，例如 '承認品目5月分.csv' -> '5月分'
-        month_name_match = filename.split('承認品目')[-1].replace('.csv', '').replace('.xlsx - ', '')
+        month_name_match = filename.split('承認品目')[-1].replace('.csv', '').replace('.xlsx - ', '').replace('.xlsx', '')
         month_name = month_name_match.strip() if month_name_match.strip() else "未知月份"
         
         # 2. 讀取檔案
@@ -136,11 +136,13 @@ def process_uploaded_file(uploaded_file):
 
 
         # 3. 清理與重命名欄位
-        df.columns = df.columns.str.replace(r'\s+|\n', '', regex=True)
+        # 關鍵修正: 使用正則表達式去除所有空格 (半形\s、全形　) 和換行符號\n，以確保正確匹配日文欄位名稱。
+        df.columns = df.columns.str.replace(r'[\s\n　]', '', regex=True)
         
         japanese_cols = {
-            '販 売 名( 会 社 名、 法 人 番 号)': 'Trade_Name_JP',
-            '成 分 名(下線:新有効成分)': 'Ingredient_JP',
+            # 修正後的鍵名 (必須與清理後的 DataFrame 欄位名稱完全匹配)
+            '販賣名(會社名、法人番號)': 'Trade_Name_JP',
+            '成分名(下線:新有効成分)': 'Ingredient_JP',
             '効能・効果等': 'Efficacy_JP',
             '承認日': 'Approval_Date',
             '分野': 'Category',
@@ -148,15 +150,29 @@ def process_uploaded_file(uploaded_file):
             '承認': 'Approval_Type'
         }
         
-        df = df.rename(columns=japanese_cols)
+        # 檢查欄位是否存在後才進行重命名
+        cols_to_rename = {k: v for k, v in japanese_cols.items() if k in df.columns}
+        if len(cols_to_rename) < 7: # 至少要有三個主要欄位
+             st.error("錯誤: 檔案標頭結構與預期的 PMDA 列表不符。請確認檔案內容是否正確。")
+             return None, None
+
+        df = df.rename(columns=cols_to_rename)
         
         # 4. 篩選關鍵欄位並清理空行
         key_cols = ['Category', 'Approval_Date', 'No', 'Trade_Name_JP', 'Approval_Type', 'Ingredient_JP', 'Efficacy_JP']
+        # 檢查關鍵列是否全部存在
+        missing_cols = [col for col in key_cols if col not in df.columns]
+        if missing_cols:
+             # 如果 missing_cols 不為空，表示重命名後仍有欄位缺失，這不應該發生在成功的重命名後，但作為最終防護。
+             st.error(f"錯誤: 處理後的 DataFrame 缺少關鍵欄位: {', '.join(missing_cols)}。")
+             return None, None
+        
         df = df[key_cols].dropna(subset=['Trade_Name_JP', 'Ingredient_JP', 'Efficacy_JP'], how='all').reset_index(drop=True)
         
         return month_name, df
 
     except Exception as e:
+        # 針對讀取 Excel/CSV 檔案本身的錯誤進行報告
         st.error(f"處理檔案 **{uploaded_file.name}** 時發生錯誤。請確認檔案是正確的 PMDA 列表格式 (CSV 或 XLSX)。錯誤訊息: {e}")
         return None, None
     
