@@ -1,13 +1,15 @@
 
 import streamlit as st
 import pandas as pd
+import io
+from fuzzywuzzy import process
 
 st.set_page_config(page_title="日台新藥主成分比對", layout="wide")
 st.title("日本新藥與台灣未註銷藥品主成分比對工具")
 
 jp_file = st.file_uploader("請上傳日本上市新藥一覽表（Excel）", type=["xlsx"])
 
-# 藥品類別翻譯字典
+# 翻譯字典
 category_dict = {
     "抗悪": "抗癌藥",
     "ワクチン": "疫苗",
@@ -17,26 +19,21 @@ category_dict = {
     "一般": "一般藥品",
     "希少疾病用医薬品": "罕見疾病用藥"
 }
-# 核可狀態翻譯字典
 approval_dict = {
     "承認": "新藥核准",
     "一変": "部分變更核准"
 }
-# 可擴充藥商、主成分、用途的對照表或串接API
 company_dict = {
     "あすか製薬㈱": "Aska Pharmaceutical",
     "ノバルティスファーマ㈱": "Novartis Pharma",
-    # ...可自行擴充
 }
 ingredient_dict = {
     "ドロスピレノン": "Drospirenone",
     "イプタコパン塩酸塩水和物": "Iptacopan Hydrochloride Hydrate",
-    # ...可自行擴充
 }
 indication_dict = {
     "避妊を効能・効果とする新効能・新用量・その他の医薬品": "避孕",
     "C3腎症を効能・効果とする新効能医薬品": "C3腎症治療",
-    # ...可自行擴充
 }
 
 def parse_japan_excel(file):
@@ -48,7 +45,6 @@ def parse_japan_excel(file):
         except Exception as e:
             st.warning(f"{sheet} 分頁讀取失敗：{e}")
             continue
-        # 欄位標準化
         df = df.rename(columns={
             "分野": "藥品類別",
             "承認日": "核准日",
@@ -58,57 +54,70 @@ def parse_japan_excel(file):
             "成  分  名 (下線:新有効成分)": "主成分",
             "効能・効果等": "用途"
         })
-        # 清理空白列
         df = df.dropna(how='all')
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             prod_info = str(row.get("商品名與藥商", ""))
             ingr_jp = str(row.get("主成分", "")).strip()
             if not prod_info or not ingr_jp:
-                continue  # 跳過空資料
-            # 商品名與藥商分開
+                continue
             if "（" in prod_info:
                 prod_name = prod_info.split("（")[0].strip()
                 company_jp = prod_info.split("（")[-1].replace("）", "").strip()
             else:
                 prod_name = prod_info
                 company_jp = ""
-            # 主成分轉英文
             ingr_en = ingredient_dict.get(ingr_jp, ingr_jp)
-            # 藥商轉英文
             company_en = company_dict.get(company_jp, company_jp)
-            # 用途轉中文
             indication_jp = str(row.get("用途", "")).strip()
             indication_zh = indication_dict.get(indication_jp, indication_jp)
-            # 藥品類別翻譯
             category_zh = category_dict.get(row.get("藥品類別", ""), row.get("藥品類別", ""))
-            # 核可狀態翻譯
             approval_zh = approval_dict.get(row.get("核可狀態", ""), row.get("核可狀態", ""))
             all_rows.append({
                 "月份": sheet,
                 "藥品類別": category_zh,
                 "核准日": row.get("核准日", ""),
-                "商品名": prod_name,  # 保留片假名
-                "藥商": company_en,   # 中文或英文
-                "主成分": ingr_en,    # 英文或中文
-                "用途": indication_zh, # 中文或英文簡介
+                "商品名": prod_name,
+                "藥商": company_en,
+                "主成分": ingr_en,
+                "用途": indication_zh,
                 "核可狀態": approval_zh,
             })
     return pd.DataFrame(all_rows)
 
 if jp_file:
-    jp_df = parse_japan_excel(jp_file)
-    tw_df = pd.read_csv("37_2.csv")
-    
-    st.subheader("日本新藥項目資訊")
-    st.dataframe(jp_df)
-    
-    st.subheader("主成分比對台灣未註銷藥品結果")
-    results = []
-    for idx, row in jp_df.iterrows():
-        jp_inn = str(row["主成分"]).strip()
-        matched = tw_df[tw_df["主成分"].astype(str).str.strip() == jp_inn]
-        if not matched.empty:
-            for _, tw_row in matched.iterrows():
+    with st.spinner("資料處理中，請稍候..."):
+        jp_df = parse_japan_excel(jp_file)
+        tw_df = pd.read_csv("37_2.csv")
+
+        st.subheader("日本新藥項目資訊")
+        st.dataframe(jp_df)
+
+        st.subheader("主成分比對台灣未註銷藥品結果（含模糊比對）")
+        results = []
+        tw_ingredients = tw_df["主成分"].astype(str).str.strip().tolist()
+
+        for _, row in jp_df.iterrows():
+            jp_inn = str(row["主成分"]).strip()
+            # 模糊比對
+            match, score = process.extractOne(jp_inn, tw_ingredients)
+            if score >= 80:  # 相似度門檻
+                matched = tw_df[tw_df["主成分"].astype(str).str.strip() == match]
+                for _, tw_row in matched.iterrows():
+                    results.append({
+                        "日本主成分": jp_inn,
+                        "日本商品名": row["商品名"],
+                        "日本核准日": row["核准日"],
+                        "日本用途": row["用途"],
+                        "日本藥商": row["藥商"],
+                        "日本核可狀態": row["核可狀態"],
+                        "台灣商品名": tw_row.get("商品名", ""),
+                        "台灣主成分": tw_row.get("主成分", ""),
+                        "台灣劑型/規格": tw_row.get("劑型/規格", ""),
+                        "台灣藥商": tw_row.get("藥商", ""),
+                        "台灣許可證號": tw_row.get("許可證號", ""),
+                        "比對相似度": score
+                    })
+            else:
                 results.append({
                     "日本主成分": jp_inn,
                     "日本商品名": row["商品名"],
@@ -116,32 +125,27 @@ if jp_file:
                     "日本用途": row["用途"],
                     "日本藥商": row["藥商"],
                     "日本核可狀態": row["核可狀態"],
-                    "台灣商品名": tw_row.get("商品名", ""),
-                    "台灣主成分": tw_row.get("主成分", ""),
-                    "台灣劑型/規格": tw_row.get("劑型/規格", ""),
-                    "台灣藥商": tw_row.get("藥商", ""),
-                    "台灣許可證號": tw_row.get("許可證號", ""),
+                    "台灣商品名": "無上市品項",
+                    "台灣主成分": "",
+                    "台灣劑型/規格": "",
+                    "台灣藥商": "",
+                    "台灣許可證號": "",
+                    "比對相似度": score
                 })
-        else:
-            results.append({
-                "日本主成分": jp_inn,
-                "日本商品名": row["商品名"],
-                "日本核准日": row["核准日"],
-                "日本用途": row["用途"],
-                "日本藥商": row["藥商"],
-                "日本核可狀態": row["核可狀態"],
-                "台灣商品名": "無上市品項",
-                "台灣主成分": "",
-                "台灣劑型/規格": "",
-                "台灣藥商": "",
-                "台灣許可證號": "",
-            })
-    result_df = pd.DataFrame(results)
-    st.dataframe(result_df)
-    csv = result_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("下載比對結果 (CSV)", csv, "compare_result.csv", "text/csv")
+
+        result_df = pd.DataFrame(results)
+        st.dataframe(result_df)
+
+        # CSV 下載
+        csv = result_df.to_csv(index=False).encode('utf-8-sig')
+        st.download_button("下載比對結果 (CSV)", csv, "compare_result.csv", "text/csv")
+
+        # Excel 下載
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+            result_df.to_excel(writer, index=False, sheet_name='比對結果')
+        st.download_button("下載比對結果 (Excel)", output.getvalue(), "compare_result.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
 else:
     st.info("請上傳日本新藥 Excel 檔案。")
 
 st.markdown("---")
-st.markdown("本工具僅供學術或內部參考，資料來源請自行確認。")
