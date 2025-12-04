@@ -64,7 +64,8 @@ def translate_drug_info(japanese_data_list):
             "responseSchema": response_schema
         }
     }
-
+    
+    response = None # 初始化 response 變數
     # 實作指數退避 (Exponential Backoff) 處理 API 呼叫失敗
     max_retries = 5
     for attempt in range(max_retries):
@@ -89,6 +90,11 @@ def translate_drug_info(japanese_data_list):
             return None
 
         except requests.exceptions.RequestException as e:
+            # 偵測 403 錯誤，這是授權失敗的明確指示
+            if response is not None and response.status_code == 403:
+                st.error("API 呼叫失敗：403 Forbidden (權限不足)。這通常表示 API 金鑰無效或缺少使用該模型的權限。請檢查 Streamlit/Canvas 環境中的 API 金鑰設定。")
+                return None
+            
             if attempt < max_retries - 1:
                 wait_time = 2 ** attempt # 1s, 2s, 4s, 8s...
                 time.sleep(wait_time)
@@ -140,7 +146,7 @@ def process_uploaded_file(uploaded_file):
         df.columns = df.columns.str.replace(r'[\s\n　]', '', regex=True)
         
         japanese_cols = {
-            # 修正鍵名: 將「販賣」(Traditional Chinese) 修正為「販売」(Japanese)
+            # 修正鍵名: 確保與清理後的日文 PMDA 欄位名稱完全匹配
             '販売名(会社名、法人番号)': 'Trade_Name_JP', 
             '成分名(下線:新有効成分)': 'Ingredient_JP',
             '効能・効果等': 'Efficacy_JP',
