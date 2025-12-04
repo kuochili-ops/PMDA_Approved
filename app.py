@@ -3,24 +3,16 @@ import streamlit as st
 import pandas as pd
 
 st.set_page_config(page_title="日台新藥主成分比對", layout="wide")
-
 st.title("日本新藥與台灣未註銷藥品主成分比對工具")
 
-# 上傳日本新藥 Excel
 jp_file = st.file_uploader("請上傳日本上市新藥一覽表（Excel）", type=["xlsx"])
-# 上傳台灣未註銷藥品許可證資料集
-tw_file = st.file_uploader("請上傳台灣未註銷藥品許可證資料集（CSV）", type=["csv"])
 
 def parse_japan_excel(file):
-    # 讀取所有 sheet
     xls = pd.ExcelFile(file)
     all_rows = []
     for sheet in xls.sheet_names:
         df = pd.read_excel(xls, sheet)
-        # 嘗試找出主成分、商品名、核准日等欄位
-        # 這裡以你提供的格式為例，實際欄位需根據檔案調整
         for i, row in df.iterrows():
-            # 跳過非資料列
             if not isinstance(row.get("成 分 名", None), str):
                 continue
             all_rows.append({
@@ -34,12 +26,14 @@ def parse_japan_excel(file):
             })
     return pd.DataFrame(all_rows)
 
-if jp_file and tw_file:
-    # 解析日本新藥
+if jp_file:
     jp_df = parse_japan_excel(jp_file)
-    # 讀取台灣資料集
-    tw_df = pd.read_csv(tw_file)
-    st.subheader("比對結果")
+    tw_df = pd.read_csv("37_2.csv")
+    
+    st.subheader("日本新藥項目資訊")
+    st.dataframe(jp_df)
+    
+    st.subheader("主成分比對台灣未註銷藥品結果")
     results = []
     for idx, row in jp_df.iterrows():
         jp_inn = str(row["主成分"]).strip()
@@ -71,12 +65,6 @@ if jp_file and tw_file:
             })
     result_df = pd.DataFrame(results)
     st.dataframe(result_df)
-    # 提供下載
     csv = result_df.to_csv(index=False).encode('utf-8-sig')
     st.download_button("下載比對結果 (CSV)", csv, "compare_result.csv", "text/csv")
 else:
-    st.info("請同時上傳日本新藥 Excel 及台灣未註銷藥品許可證 CSV。")
-
-st.markdown("---")
-st.markdown("本工具僅供學術或內部參考，資料來源請自行確認。")
-
