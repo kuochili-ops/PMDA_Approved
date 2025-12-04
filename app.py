@@ -3,7 +3,22 @@ import pandas as pd
 import requests
 import io
 import re
+#
+import requests, streamlit as st
 
+endpoint = "https://api.cognitive.microsofttranslator.com/translate"
+params = {"api-version": "3.0", "from": "ja", "to": ["zh-Hant", "en"]}
+headers = {
+    "Ocp-Apim-Subscription-Key": st.secrets["AZURE_KEY"],
+    "Ocp-Apim-Subscription-Region": st.secrets["AZURE_REGION"],
+    "Content-type": "application/json"
+}
+body = [{"text": "ドロスピレノン"}]
+
+response = requests.post(endpoint, params=params, headers=headers, json=body)
+st.write(response.json())
+
+#
 # 從 Streamlit Cloud Secrets Manager 讀取金鑰
 AZURE_KEY = st.secrets["AZURE_KEY"]
 AZURE_REGION = st.secrets["AZURE_REGION"]
