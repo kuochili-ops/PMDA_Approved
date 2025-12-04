@@ -11,10 +11,14 @@ def parse_japan_excel(file):
     xls = pd.ExcelFile(file)
     all_rows = []
     for sheet in xls.sheet_names:
-        df = pd.read_excel(xls, sheet)
-        st.write(f"{sheet} 欄位名稱：", df.columns.tolist())  # 顯示欄位名稱，方便檢查
+        # 先讀前幾列，找出欄位名稱
+        df_raw = pd.read_excel(xls, sheet, header=None)
+        st.write(f"{sheet} 前10列：")
+        st.dataframe(df_raw.head(10))
+        # 假設欄位名稱在第2列（index=1），請根據實際情況調整
+        df = pd.read_excel(xls, sheet, header=1)
+        st.write(f"{sheet} 欄位名稱：", df.columns.tolist())
         for i, row in df.iterrows():
-            # 請根據實際欄位名稱完全比對
             if not isinstance(row.get("成  分  名\n(下線:新有効成分)", None), str):
                 continue
             all_rows.append({
@@ -75,4 +79,3 @@ else:
     st.info("請上傳日本新藥 Excel 檔案。")
 
 st.markdown("---")
-st.markdown("本工具僅供學術或內部參考，資料來源請自行確認。")
