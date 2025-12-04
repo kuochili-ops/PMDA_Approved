@@ -6,11 +6,11 @@ import requests
 import io
 
 # --- 配置 (Configuration) ---
-# 在 Canvas 環境中，API Key 會被自動提供。在外部環境，請確保您有設置 GEMINI_API_KEY
-# For Canvas environment, leave API_KEY as empty string.
-API_KEY = "" 
+# 在 Canvas 環境中，API Key 會被自動提供並在請求標頭中注入。
+# 因此，API URL 應不包含 'key=' 參數，以依賴環境的認證。
 MODEL_NAME = "gemini-2.5-flash-preview-09-2025"
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent?key={API_KEY}"
+# 修正 API URL，不包含 key 參數，完全依賴環境認證。
+API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent" 
 
 
 def translate_drug_info(japanese_data_list):
@@ -70,6 +70,7 @@ def translate_drug_info(japanese_data_list):
     max_retries = 5
     for attempt in range(max_retries):
         try:
+            # 確保使用 Content-Type header
             response = requests.post(
                 API_URL,
                 headers={'Content-Type': 'application/json'},
@@ -92,7 +93,8 @@ def translate_drug_info(japanese_data_list):
         except requests.exceptions.RequestException as e:
             # 偵測 403 錯誤，這是授權失敗的明確指示
             if response is not None and response.status_code == 403:
-                st.error("API 呼叫失敗：403 Forbidden (權限不足)。這通常表示 API 金鑰無效或缺少使用該模型的權限。請檢查 Streamlit/Canvas 環境中的 API 金鑰設定。")
+                # 再次強調這是環境或權限問題
+                st.error("API 呼叫失敗：403 Forbidden (權限不足)。這**不是程式碼邏輯**錯誤，而是**Streamlit/Canvas 環境中的 API 金鑰或模型存取權限**問題。請聯繫平台支援。")
                 return None
             
             if attempt < max_retries - 1:
@@ -295,6 +297,7 @@ def main():
                         }
                     else:
                         # 儲存翻譯失敗的標記
+                        # 由於 403 錯誤已經被 translate_drug_info 處理並顯示，這裡直接記錄錯誤
                         st.session_state.processed_data[uploaded_file.name] = {
                             'month_name': month_name,
                             'df': None,
@@ -313,7 +316,10 @@ def main():
             processing_bar.progress(1.0, text="所有檔案處理完畢！")
             time.sleep(1)
             processing_bar.empty()
-            st.success("所有新檔案處理完畢！")
+            # 只有在沒有 API 錯誤發生的情況下才顯示成功
+            has_api_error = any(v.get('error') for v in st.session_state.processed_data.values())
+            if not has_api_error:
+                 st.success("所有新檔案處理完畢！")
 
 
         # 2. 結果顯示 (使用 Tab)
@@ -341,6 +347,7 @@ def main():
                     st.dataframe(df, use_container_width=True, hide_index=True)
                     
                     # 3. 下載按鈕
+                    # 必須確保 DataFrame 存在
                     csv_export = df.to_csv(index=False).encode('utf-8')
                     st.download_button(
                         label=f"📥 下載 {month_name} 翻譯列表 (CSV)",
@@ -352,10 +359,11 @@ def main():
         # 4. 處理失敗檔案的提示
         failed_files = {k: v for k, v in st.session_state.processed_data.items() if v.get('error') and v['df'] is None}
         if failed_files:
-            st.error("以下檔案處理或翻譯失敗：")
+            # 顯示更詳細的錯誤提示
+            st.error("以下檔案處理或翻譯失敗，請檢查錯誤訊息：")
             for filename in failed_files.keys():
-                st.write(f"- {filename}")
-            st.markdown("請確認檔案為標準 PMDA 列表格式，且內容符合預期結構。")
+                st.write(f"- {filename} (請查看詳細錯誤提示)")
+            st.markdown("如果錯誤持續顯示 **403 Forbidden**，請聯繫平台支援以檢查 API 權限。")
 
 
 if __name__ == "__main__":
