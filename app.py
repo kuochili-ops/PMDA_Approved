@@ -1,5 +1,15 @@
 
+import streamlit as st
 import pandas as pd
+
+uploaded_file = st.file_uploader("請上傳 Excel 檔案", type=["xlsx"])
+if uploaded_file is not None:
+    xls = pd.ExcelFile(uploaded_file)
+    # 其餘資料處理同前
+    # ...
+else:
+    st.warning("請先上傳檔案！")
+
 
 # 讀取 Excel 檔案
 file_path = "000277966.xlsx"
