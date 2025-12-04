@@ -140,8 +140,8 @@ def process_uploaded_file(uploaded_file):
         df.columns = df.columns.str.replace(r'[\s\n　]', '', regex=True)
         
         japanese_cols = {
-            # 修正後的鍵名 (必須與清理後的 DataFrame 欄位名稱完全匹配)
-            '販賣名(會社名、法人番號)': 'Trade_Name_JP',
+            # 修正鍵名: 將「販賣」(Traditional Chinese) 修正為「販売」(Japanese)
+            '販売名(会社名、法人番号)': 'Trade_Name_JP', 
             '成分名(下線:新有効成分)': 'Ingredient_JP',
             '効能・効果等': 'Efficacy_JP',
             '承認日': 'Approval_Date',
@@ -152,20 +152,20 @@ def process_uploaded_file(uploaded_file):
         
         # 檢查欄位是否存在後才進行重命名
         cols_to_rename = {k: v for k, v in japanese_cols.items() if k in df.columns}
-        if len(cols_to_rename) < 7: # 至少要有三個主要欄位
-             st.error("錯誤: 檔案標頭結構與預期的 PMDA 列表不符。請確認檔案內容是否正確。")
+        
+        # 修正檢查條件: 確保所有預期的欄位都存在
+        required_keys = japanese_cols.keys()
+        if not all(k in df.columns for k in required_keys): 
+             # 增加更詳細的錯誤訊息，指出缺少哪些欄位
+             missing_cols = [k for k in required_keys if k not in df.columns]
+             st.error(f"錯誤: 檔案標頭結構與預期的 PMDA 列表不符。缺少以下欄位 (日文原名，已清除空格): {', '.join(missing_cols)}")
              return None, None
 
         df = df.rename(columns=cols_to_rename)
         
         # 4. 篩選關鍵欄位並清理空行
         key_cols = ['Category', 'Approval_Date', 'No', 'Trade_Name_JP', 'Approval_Type', 'Ingredient_JP', 'Efficacy_JP']
-        # 檢查關鍵列是否全部存在
-        missing_cols = [col for col in key_cols if col not in df.columns]
-        if missing_cols:
-             # 如果 missing_cols 不為空，表示重命名後仍有欄位缺失，這不應該發生在成功的重命名後，但作為最終防護。
-             st.error(f"錯誤: 處理後的 DataFrame 缺少關鍵欄位: {', '.join(missing_cols)}。")
-             return None, None
+        # 由於上一步已經檢查並重命名，這一步應該不會缺少欄位
         
         df = df[key_cols].dropna(subset=['Trade_Name_JP', 'Ingredient_JP', 'Efficacy_JP'], how='all').reset_index(drop=True)
         
