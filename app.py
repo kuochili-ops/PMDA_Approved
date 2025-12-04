@@ -81,4 +81,7 @@ if uploaded_file is not None:
         data=result_df.to_excel(index=False, encoding="utf-8"),
         file_name="新藥中英文對照.xlsx"
     )
+
 else:
+    st.warning("請先上傳檔案！")
+
