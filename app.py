@@ -2,13 +2,21 @@
 import streamlit as st
 import pandas as pd
 
+st.title("PMDA 新藥品目中英文對照表產生器")
+
 uploaded_file = st.file_uploader("請上傳 Excel 檔案", type=["xlsx"])
 if uploaded_file is not None:
-    xls = pd.ExcelFile(uploaded_file)
-    # 其餘資料處理同前
-    # ...
+    # 直接用 uploaded_file 讀取 Excel
+    xls = pd.ExcelFile(uploaded_file, engine="openpyxl")
+    sheet_names = xls.sheet_names
+    # 以5月分為例
+    target_sheet = [s for s in sheet_names if "5月" in s][0]
+    df = pd.read_excel(uploaded_file, sheet_name=target_sheet, header=2, engine="openpyxl")
+    st.write("原始欄位名稱：", df.columns.tolist())
+    # ...（後續資料清理與轉換同前，請將之前的資料處理程式碼接在這裡）
 else:
     st.warning("請先上傳檔案！")
+
 
 
 # 讀取 Excel 檔案
