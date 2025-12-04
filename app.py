@@ -1,93 +1,37 @@
 import streamlit as st
 import pandas as pd
-import json
-import time
 import requests
 import io
 import re
 
-# --- 配置 ---
-MODEL_NAME = "gemini-1.5-flash"  # 改成穩定可用的模型
-API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/{MODEL_NAME}:generateContent"
-def translate_drug_info(japanese_data_list):
-    """使用 Gemini API 翻譯藥品資訊列表，並要求結構化 JSON 輸出。"""
-    if not japanese_data_list:
-        return []
+# 從 Streamlit Cloud Secrets Manager 讀取金鑰
+AZURE_KEY = st.secrets["AZURE_KEY"]
+AZURE_REGION = st.secrets["AZURE_REGION"]
 
-    system_prompt = (
-        "You are an expert pharmaceutical translator. Translate the provided Japanese drug information "
-        "into Traditional Chinese and English. You MUST return a single JSON array that matches the provided JSON schema. "
-        "Maintain the original Japanese text if the Japanese column contains complex formatting or identifiers. "
-        "The translation must be accurate and concise."
-    )
+endpoint = "https://api.cognitive.microsofttranslator.com/translate"
+params = {"api-version": "3.0", "from": "ja", "to": ["zh-Hant", "en"]}
+headers = {
+    "Ocp-Apim-Subscription-Key": AZURE_KEY,
+    "Ocp-Apim-Subscription-Region": AZURE_REGION,
+    "Content-type": "application/json"
+}
+def translate_drug_info_ms(japanese_data_list):
+    results = []
+    for item in japanese_data_list:
+        body = [{"text": f"{item['trade_name_jp']} {item['ingredient_jp']} {item['efficacy_jp']}"}]
+        response = requests.post(endpoint, params=params, headers=headers, json=body)
+        data = response.json()[0]["translations"]
 
-    data_to_translate = "\n---\n".join([
-        f"Trade Name (JP): {item['trade_name_jp']}\nIngredient (JP): {item['ingredient_jp']}\nEfficacy (JP): {item['efficacy_jp']}"
-        for item in japanese_data_list
-    ])
-
-    user_query = f"Translate the following Japanese drug entries. Respond ONLY with the JSON array.\n\n{data_to_translate}"
-
-    response_schema = {
-        "type": "ARRAY",
-        "items": {
-            "type": "OBJECT",
-            "properties": {
-                "trade_name_zh": {"type": "STRING"},
-                "trade_name_en": {"type": "STRING"},
-                "ingredient_zh": {"type": "STRING"},
-                "ingredient_en": {"type": "STRING"},
-                "efficacy_zh": {"type": "STRING"},
-                "efficacy_en": {"type": "STRING"}
-            },
-            "required": ["trade_name_zh", "trade_name_en", "ingredient_zh", "ingredient_en", "efficacy_zh", "efficacy_en"]
-        }
-    }
-
-    payload = {
-        "contents": [{"parts": [{"text": user_query}]}],
-        "systemInstruction": {"parts": [{"text": system_prompt}]},
-        "generationConfig": {
-            "responseMimeType": "application/json",
-            "responseSchema": response_schema
-        }
-    }
-
-    response = None
-    max_retries = 5
-    for attempt in range(max_retries):
-        try:
-            response = requests.post(
-                API_URL,
-                headers={'Content-Type': 'application/json'},
-                data=json.dumps(payload),
-                timeout=60
-            )
-            response.raise_for_status()
-            result = response.json()
-            json_text = result.get('candidates', [{}])[0].get('content', {}).get('parts', [{}])[0].get('text')
-            if json_text:
-                return json.loads(json_text)
-            st.error("API 回應成功，但未找到預期的 JSON 翻譯結果。")
-            return None
-        except requests.exceptions.RequestException as e:
-            if response is not None and response.status_code == 403:
-                st.error("API 呼叫失敗：403 Forbidden。請確認模型授權。")
-                return None
-            if attempt < max_retries - 1:
-                time.sleep(2 ** attempt)
-            else:
-                st.error(f"API 呼叫失敗: {e}")
-                return None
-        except json.JSONDecodeError:
-            st.error("翻譯結果格式錯誤，無法解析 JSON。")
-            return None
-        except Exception as e:
-            st.error(f"翻譯過程中發生意外錯誤: {e}")
-            return None
-    return None
+        results.append({
+            "trade_name_zh": data[0]["text"],
+            "trade_name_en": data[1]["text"],
+            "ingredient_zh": data[0]["text"],
+            "ingredient_en": data[1]["text"],
+            "efficacy_zh": data[0]["text"],
+            "efficacy_en": data[1]["text"]
+        })
+    return results
 def process_uploaded_file(uploaded_file):
-    """讀取 CSV/XLSX 檔案，清理資料。"""
     try:
         filename = uploaded_file.name
         file_type = uploaded_file.type
@@ -124,8 +68,6 @@ def process_uploaded_file(uploaded_file):
                 rename_map[col] = 'Approval_Type'
 
         df = df.rename(columns=rename_map)
-
-        # 篩選關鍵欄位
         key_cols = ['Category', 'Approval_Date', 'No', 'Trade_Name_JP', 'Approval_Type', 'Ingredient_JP', 'Efficacy_JP']
         df = df[key_cols].dropna(subset=['Trade_Name_JP', 'Ingredient_JP', 'Efficacy_JP'], how='all').reset_index(drop=True)
 
@@ -134,7 +76,6 @@ def process_uploaded_file(uploaded_file):
         st.error(f"處理檔案 {uploaded_file.name} 時發生錯誤: {e}")
         return None
 def translate_and_combine(df):
-    """翻譯並合併結果。"""
     data_for_translation = df.apply(
         lambda row: {
             'trade_name_jp': row['Trade_Name_JP'],
@@ -145,15 +86,7 @@ def translate_and_combine(df):
     ).tolist()
 
     st.info(f"正在翻譯 {len(data_for_translation)} 筆藥品資料...")
-    translated_results = translate_drug_info(data_for_translation)
-
-    if translated_results is None or len(translated_results) != len(df):
-        st.warning("批次翻譯數量不一致，改用逐筆翻譯。")
-        translated_results = []
-        for item in data_for_translation:
-            res = translate_drug_info([item])
-            if res:
-                translated_results.append(res[0])
+    translated_results = translate_drug_info_ms(data_for_translation)
 
     df_translated = pd.DataFrame(translated_results)
     final_df = pd.concat([df.reset_index(drop=True), df_translated.reset_index(drop=True)], axis=1)
@@ -177,7 +110,7 @@ def translate_and_combine(df):
     return final_df
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
-    st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器")
+    st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (Microsoft Translator 版)")
 
     uploaded_files = st.file_uploader(
         "上傳新藥列表檔案 (CSV/XLSX)", 
@@ -192,16 +125,26 @@ def main():
                 translated_df = translate_and_combine(df)
                 if translated_df is not None:
                     st.subheader(f"翻譯結果：{uploaded_file.name}")
-                    st.dataframe(translated_df, use_container_width=True, hide_index=True)
 
-                    # 提供下載按鈕
-                    csv_export = translated_df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label=f"📥 下載翻譯結果 ({uploaded_file.name})",
-                        data=csv_export,
-                        file_name=f"{uploaded_file.name}_Translated.csv",
-                        mime='text/csv'
-                    )
+                    # 🔑 分段依月份顯示
+                    translated_df["月份"] = pd.to_datetime(translated_df["承認日"], errors="coerce").dt.month.astype(str) + "月"
+
+                    month_groups = translated_df.groupby("月份")
+                    tabs = st.tabs([f"{month}" for month in month_groups.groups.keys()])
+
+                    for i, (month, group_df) in enumerate(month_groups):
+                        with tabs[i]:
+                            st.header(f"{month} 翻譯結果")
+                            st.dataframe(group_df, use_container_width=True, hide_index=True)
+
+                            # 提供下載按鈕
+                            csv_export = group_df.to_csv(index=False).encode('utf-8')
+                            st.download_button(
+                                label=f"📥 下載 {month} 翻譯結果 (CSV)",
+                                data=csv_export,
+                                file_name=f"{uploaded_file.name}_{month}_Translated.csv",
+                                mime='text/csv'
+                            )
 
 if __name__ == "__main__":
     main()
