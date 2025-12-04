@@ -1,6 +1,7 @@
 
 import streamlit as st
 import pandas as pd
+import io
 
 st.title("PMDA新藥品目中英文對照表產生器")
 
@@ -75,13 +76,16 @@ if uploaded_file is not None:
     result_df = pd.DataFrame(translated_rows)
     st.dataframe(result_df)
 
-    # 提供下載
+    # 產生 Excel 檔案 bytes
+    output = io.BytesIO()
+    result_df.to_excel(output, index=False, encoding="utf-8")
+    output.seek(0)
+
     st.download_button(
         label="下載中英文對照表 Excel",
-        data=result_df.to_excel(index=False, encoding="utf-8"),
-        file_name="新藥中英文對照.xlsx"
+        data=output,
+        file_name="新藥中英文對照.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
 else:
     st.warning("請先上傳檔案！")
-
