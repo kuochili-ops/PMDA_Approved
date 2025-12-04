@@ -56,15 +56,3 @@ if jp_file:
                 "日本主成分": jp_inn,
                 "日本商品名": row["商品名"],
                 "日本核准日": row["核准日"],
-                "日本用途": row["用途"],
-                "台灣商品名": "無上市品項",
-                "台灣主成分": "",
-                "台灣劑型/規格": "",
-                "台灣藥商": "",
-                "台灣許可證號": "",
-            })
-    result_df = pd.DataFrame(results)
-    st.dataframe(result_df)
-    csv = result_df.to_csv(index=False).encode('utf-8-sig')
-    st.download_button("下載比對結果 (CSV)", csv, "compare_result.csv", "text/csv")
-else:
