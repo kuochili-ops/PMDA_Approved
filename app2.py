@@ -50,11 +50,13 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 翻譯主流程 ======
+# ====== 翻譯主流程，含進度顯示 ======
 def translate_and_combine(df):
     trade_name_en_list = []
     ingredient_en_list = []
+    progress = st.empty()
     for idx, row in df.iterrows():
+        progress.info(f"第 {idx+1} 項翻譯中…")
         kegg_result = kegg_drug_english_names(str(row.get('販賣名/公司 (日文)', row.get('Trade_Name_JP', ''))))
         trade_name_en = kegg_result["trade_name_en_kegg"]
         ingredient_en = kegg_result["ingredient_en_kegg"]
@@ -65,7 +67,7 @@ def translate_and_combine(df):
         trade_name_en_list.append(trade_name_en)
         ingredient_en_list.append(ingredient_en)
         time.sleep(0.34)  # KEGG 頻率限制
-
+    progress.success("全部翻譯完成！")
     df['Trade Name/Company (English)'] = trade_name_en_list
     df['Ingredient Name (English)'] = ingredient_en_list
     return df
