@@ -14,7 +14,10 @@ def translate_and_combine(df):
 def save_sheets_to_csv(uploaded_file):
     # ...您的分頁轉 csv 函式
 
+
 def main():
+    pass
+
     # ...您的主流程
 
 if __name__ == "__main__":
