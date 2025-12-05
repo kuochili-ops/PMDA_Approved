@@ -7,68 +7,116 @@ import re
 import time
 import os
 
+# ====== API 金鑰設定（請填入你自己的） ======
+AZURE_KEY = st.secrets["AZURE_KEY"]
+AZURE_REGION = st.secrets["AZURE_REGION"]
+endpoint = "https://api.cognitive.microsofttranslator.com/translate"
+headers = {
+    "Ocp-Apim-Subscription-Key": AZURE_KEY,
+    "Ocp-Apim-Subscription-Region": AZURE_REGION,
+    "Content-type": "application/json"
+}
+
+# ====== KEGG API 查詢函式 ======
+def kegg_drug_english_names(jp_name):
+    url = f"https://rest.kegg.jp/find/drug/{jp_name}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.ok and resp.text:
+            line = resp.text.split('\n')[0]
+            fields = line.split()
+            if len(fields) > 1:
+                names = [n.strip() for n in fields[1].split(';')]
+                trade_names = [n for n in names if n and n[0].isupper() and not n.isupper()]
+                english_names = [n for n in names if n and n[0].isupper() and n.isalpha()]
+                return {
+                    "trade_name_en_kegg": trade_names[0] if trade_names else "",
+                    "ingredient_en_kegg": english_names[0] if english_names else ""
+                }
+    except Exception:
+        pass
+    return {"trade_name_en_kegg": "", "ingredient_en_kegg": ""}
+
+# ====== Microsoft Translator API 單句翻譯 ======
+def ms_translator(text, from_lang="ja"):
+    body = [{"text": text}]
+    params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
+    try:
+        resp = requests.post(endpoint, params=params, headers=headers, json=body, timeout=10)
+        if resp.ok:
+            data = resp.json()
+            return data[0]["translations"][0]["text"]
+    except Exception:
+        pass
+    return ""
+
+# ====== 翻譯主流程 ======
 def translate_and_combine(df):
-    # ...請貼上您的完整翻譯流程
+    trade_name_en_list = []
+    ingredient_en_list = []
+    for idx, row in df.iterrows():
+        kegg_result = kegg_drug_english_names(str(row.get('販賣名/公司 (日文)', row.get('Trade_Name_JP', ''))))
+        trade_name_en = kegg_result["trade_name_en_kegg"]
+        ingredient_en = kegg_result["ingredient_en_kegg"]
+        if not trade_name_en:
+            trade_name_en = ms_translator(str(row.get('販賣名/公司 (日文)', row.get('Trade_Name_JP', ''))))
+        if not ingredient_en:
+            ingredient_en = ms_translator(str(row.get('成分名 (日文)', row.get('Ingredient_JP', ''))))
+        trade_name_en_list.append(trade_name_en)
+        ingredient_en_list.append(ingredient_en)
+        time.sleep(0.34)  # KEGG 頻率限制
+
+    df['Trade Name/Company (English)'] = trade_name_en_list
+    df['Ingredient Name (English)'] = ingredient_en_list
     return df
 
+# ====== 分頁另存 CSV ======
 def save_sheets_to_csv(uploaded_file):
-    # ...您的分頁轉 csv 函式
-
-
-def main():
-    pass
-
-    # ...您的主流程
-
-if __name__ == "__main__":
-
-# ...（API 金鑰與函式略，請用你現有的）
-
-def save_sheets_to_csv(uploaded_file):
-    """將每個分頁另存為 csv，回傳 {月份: csv檔名} 字典"""
     xls = pd.ExcelFile(uploaded_file)
     sheet_map = {}
     for sheet_name in xls.sheet_names:
-        # 只處理有「承認品目」的分頁
-        if "承認品目" in sheet_name:
-            df = pd.read_excel(xls, sheet_name)
-            # 取月份（如「5月」）
-            month_match = re.search(r'(\d+)月', sheet_name)
-            if not month_match:
-                # 若分頁名沒月份，從內容找
-                for col in df.columns:
-                    m = re.search(r'(\d+)月', str(col))
-                    if m:
-                        month_match = m
-                        break
-            if month_match:
-                month = month_match.group(1) + "月"
-            else:
-                month = sheet_name
-            csv_name = f"{month}.csv"
-            df.to_csv(csv_name, index=False, encoding="utf-8")
-            sheet_map[month] = csv_name
+        df = pd.read_excel(xls, sheet_name)
+        # 嘗試找月份
+        month_match = re.search(r'(\d+)月', sheet_name)
+        if not month_match:
+            for col in df.columns:
+                m = re.search(r'(\d+)月', str(col))
+                if m:
+                    month_match = m
+                    break
+        if month_match:
+            month = month_match.group(1) + "月"
+        else:
+            month = sheet_name
+        csv_name = f"{month}.csv"
+        df.to_csv(csv_name, index=False, encoding="utf-8")
+        sheet_map[month] = csv_name
     return sheet_map
 
+# ====== Streamlit 主程式 ======
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        # 1. 自動分頁另存 csv
         st.info("正在自動分割各月份...")
         month_csv_map = save_sheets_to_csv(uploaded_file)
         if not month_csv_map:
             st.warning("未偵測到任何月份分頁。")
             return
-        # 2. 每個月份 csv 讀取、翻譯、顯示
         for month, csv_name in month_csv_map.items():
             st.subheader(f"{month} 翻譯結果")
             df = pd.read_csv(csv_name, encoding="utf-8")
-            # 這裡直接呼叫你現有的翻譯主流程
+            # 欄位標準化（根據實際欄位名稱調整）
+            rename_map = {}
+            for col in df.columns:
+                if re.match(r'^販.*売.*名.*', col):
+                    rename_map[col] = '販賣名/公司 (日文)'
+                elif re.match(r'^成.*分.*名.*', col):
+                    rename_map[col] = '成分名 (日文)'
+            df = df.rename(columns=rename_map)
             translated_df = translate_and_combine(df)
             st.dataframe(translated_df, use_container_width=True, hide_index=True)
-            # 下載按鈕
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label=f"📥 下載 {month} 翻譯結果 (CSV)",
@@ -76,7 +124,6 @@ def main():
                 file_name=f"{month}_Translated.csv",
                 mime='text/csv'
             )
-            # 清理暫存 csv
             os.remove(csv_name)
 
 if __name__ == "__main__":
