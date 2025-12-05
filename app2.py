@@ -50,6 +50,7 @@ def ms_translator(text, from_lang="ja"):
     return ""
 
 # ====== 資料清理函式 ======
+
 def clean_dataframe(df):
     # 欄位標準化
     rename_map = {}
@@ -61,7 +62,7 @@ def clean_dataframe(df):
     df = df.rename(columns=rename_map)
     # 只保留有成分名的行
     if '成分名 (日文)' in df.columns:
-        df = df.dropna(subset=['成分名 (日文)'], how='any')
+        df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     # 只取藥名（去除公司名等多餘內容）
     if '販賣名/公司 (日文)' in df.columns:
         df['販賣名/公司 (日文)'] = df['販賣名/公司 (日文)'].astype(str).str.split('\n').str[0]
