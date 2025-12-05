@@ -49,11 +49,18 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 自動尋找欄位名稱行 ======
+# ====== 強化自動尋找欄位名稱行 ======
 def find_header_row(df):
     for i, row in df.iterrows():
-        row_str = ''.join([str(cell) for cell in row])
-        if '成分名' in row_str and '販' in row_str:
+        row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
+        # 移除所有空白、全形空白、換行、tab
+        row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
+        # 放寬條件：同時有「名」字出現2次以上，且有「成」和「販」字
+        if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
+            return i
+        # 或同時有「成分名」和「販賣名」的任何變形
+        if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
+           and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
             return i
     return None
 
@@ -63,11 +70,12 @@ def clean_dataframe(df):
         return pd.DataFrame()
     rename_map = {}
     for col in df.columns:
-        if re.match(r'^販.*売.*名.*', str(col)):
+        col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', str(col))
+        if re.match(r'^販.*売.*名.*', col_clean):
             rename_map[col] = '販賣名/公司 (日文)'
-        elif re.match(r'^成.*分.*名.*', str(col)):
+        elif re.match(r'^成.*分.*名.*', col_clean):
             rename_map[col] = '成分名 (日文)'
-        elif re.match(r'^No\\.?$', str(col)):
+        elif re.match(r'^No\\.?$', col_clean):
             rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
     # 只保留有藥品編號、販賣名、成分名的行
@@ -151,7 +159,7 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份（自動尋找欄位名稱行）...")
+        st.info("正在自動分割各月份（強化自動尋找欄位名稱行）...")
         month_csv_map = save_sheets_to_csv_auto_header(uploaded_file)
         if not month_csv_map:
             st.warning("未偵測到任何有效分頁。")
