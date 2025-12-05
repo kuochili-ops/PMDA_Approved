@@ -1,30 +1,24 @@
 
-import requests
-from bs4 import BeautifulSoup
+import streamlit as st
+import pandas as pd
 
-def kegg_drug_search(japanese_name):
-    # 用搜尋頁面查詢
-    search_url = f"https://www.kegg.jp/kegg-bin/search?q={japanese_name}&display=drug&from=drug&lang=ja"
-    response = requests.get(search_url)
-    if response.status_code == 200:
-        soup = BeautifulSoup(response.text, "html.parser")
-        # 找到搜尋結果表格
-        table = soup.find("table")
-        if table:
-            rows = table.find_all("tr")
-            for row in rows[1:]:  # 跳過表頭
-                cols = row.find_all("td")
-                if len(cols) >= 2:
-                    entry = cols[0].text.strip()
-                    name = cols[1].text.strip()
-                    # 取英文學名（通常在括號內）
-                    if "(" in name:
-                        english_name = name.split("(")[1].split(")")[0]
-                        return entry, english_name
-                    else:
-                        return entry, name
-    return None, None
+st.title("KEGG藥品查詢工具")
 
-# 範例查詢
-entry, english_name = kegg_drug_search("ベネトクラクス")
-print("KEGG Entry:", entry)
+uploaded_file = st.file_uploader("請上傳藥品清單（Excel/CSV）", type=['xlsx', 'xls', 'csv'])
+
+if uploaded_file:
+    df = pd.read_excel(uploaded_file, skiprows=2)
+    st.write("所有欄位名稱：", df.columns.tolist())
+
+    # 自動偵測成分名欄位
+    ingredient_col = None
+    for col in df.columns:
+        if "成分" in col.replace(" ", ""):
+            ingredient_col = col
+            break
+
+    if not ingredient_col:
+        st.error("找不到成分名相關欄位，請確認檔案格式。")
+    else:
+        st.success(f"偵測到成分名欄位：{ingredient_col}")
+        st.dataframe(df[[ingredient_col]])  # 顯示成分名欄位
