@@ -67,6 +67,8 @@ def clean_dataframe(df):
         df['販賣名/公司 (日文)'] = df['販賣名/公司 (日文)'].astype(str).str.split('\n').str[0]
     # 去除全空白行
     df = df.dropna(how='all')
+    # 去除全為空字串的行
+    df = df[~(df.applymap(lambda x: str(x).strip() == '').all(axis=1))]
     df = df.reset_index(drop=True)
     return df
 
@@ -143,4 +145,3 @@ def main():
             os.remove(csv_name)
 
 if __name__ == "__main__":
-    main()
