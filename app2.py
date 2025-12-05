@@ -2,7 +2,6 @@
 import streamlit as st
 import pandas as pd
 import requests
-import io
 import re
 import time
 import os
@@ -50,20 +49,43 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
+# ====== 資料清理函式 ======
+def clean_dataframe(df):
+    # 欄位標準化
+    rename_map = {}
+    for col in df.columns:
+        if re.match(r'^販.*売.*名.*', col):
+            rename_map[col] = '販賣名/公司 (日文)'
+        elif re.match(r'^成.*分.*名.*', col):
+            rename_map[col] = '成分名 (日文)'
+    df = df.rename(columns=rename_map)
+    # 只保留有成分名的行
+    if '成分名 (日文)' in df.columns:
+        df = df.dropna(subset=['成分名 (日文)'], how='any')
+    # 只取藥名（去除公司名等多餘內容）
+    if '販賣名/公司 (日文)' in df.columns:
+        df['販賣名/公司 (日文)'] = df['販賣名/公司 (日文)'].astype(str).str.split('\n').str[0]
+    # 去除全空白行
+    df = df.dropna(how='all')
+    df = df.reset_index(drop=True)
+    return df
+
 # ====== 翻譯主流程，含進度顯示 ======
 def translate_and_combine(df):
+    df = clean_dataframe(df)
+    st.write(f"本月份共 {len(df)} 筆")
     trade_name_en_list = []
     ingredient_en_list = []
     progress = st.empty()
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
-        kegg_result = kegg_drug_english_names(str(row.get('販賣名/公司 (日文)', row.get('Trade_Name_JP', ''))))
+        kegg_result = kegg_drug_english_names(str(row.get('販賣名/公司 (日文)', '')))
         trade_name_en = kegg_result["trade_name_en_kegg"]
         ingredient_en = kegg_result["ingredient_en_kegg"]
         if not trade_name_en:
-            trade_name_en = ms_translator(str(row.get('販賣名/公司 (日文)', row.get('Trade_Name_JP', ''))))
+            trade_name_en = ms_translator(str(row.get('販賣名/公司 (日文)', '')))
         if not ingredient_en:
-            ingredient_en = ms_translator(str(row.get('成分名 (日文)', row.get('Ingredient_JP', ''))))
+            ingredient_en = ms_translator(str(row.get('成分名 (日文)', '')))
         trade_name_en_list.append(trade_name_en)
         ingredient_en_list.append(ingredient_en)
         time.sleep(0.34)  # KEGG 頻率限制
@@ -109,14 +131,6 @@ def main():
         for month, csv_name in month_csv_map.items():
             st.subheader(f"{month} 翻譯結果")
             df = pd.read_csv(csv_name, encoding="utf-8")
-            # 欄位標準化（根據實際欄位名稱調整）
-            rename_map = {}
-            for col in df.columns:
-                if re.match(r'^販.*売.*名.*', col):
-                    rename_map[col] = '販賣名/公司 (日文)'
-                elif re.match(r'^成.*分.*名.*', col):
-                    rename_map[col] = '成分名 (日文)'
-            df = df.rename(columns=rename_map)
             translated_df = translate_and_combine(df)
             st.dataframe(translated_df, use_container_width=True, hide_index=True)
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
