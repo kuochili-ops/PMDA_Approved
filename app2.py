@@ -50,6 +50,7 @@ def ms_translator(text, from_lang="ja"):
     return ""
 
 # ====== 資料清理函式 ======
+
 def clean_dataframe(df):
     rename_map = {}
     for col in df.columns:
@@ -57,19 +58,22 @@ def clean_dataframe(df):
             rename_map[col] = '販賣名/公司 (日文)'
         elif re.match(r'^成.*分.*名.*', col):
             rename_map[col] = '成分名 (日文)'
+        elif re.match(r'^No\\.?$', col):
+            rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
-    # 只保留有成分名的行
-    if '成分名 (日文)' in df.columns:
-        df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
-    # 只取藥名（去除公司名等多餘內容）
-    if '販賣名/公司 (日文)' in df.columns:
-        df['販賣名/公司 (日文)'] = df['販賣名/公司 (日文)'].astype(str).str.split('\n').str[0]
-    # 去除全空白行
-    df = df.dropna(how='all')
-    # 去除全為空字串的行
-    df = df[~(df.applymap(lambda x: str(x).strip() == '').all(axis=1))]
+    # 只保留有藥品編號、販賣名、成分名的行
+    if {'No.', '販賣名/公司 (日文)', '成分名 (日文)'}.issubset(df.columns):
+        df = df[
+            df['No.'].apply(lambda x: str(x).strip().isdigit()) &
+            df['販賣名/公司 (日文)'].astype(str).str.strip().ne('') &
+            df['成分名 (日文)'].astype(str).str.strip().ne('')
+        ]
+    else:
+        # 備用：只保留成分名非空
+        if '成分名 (日文)' in df.columns:
+            df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     df = df.reset_index(drop=True)
-    return df
+
 
 # ====== 分頁另存 CSV（最佳化：先清理） ======
 def save_sheets_to_csv(uploaded_file):
