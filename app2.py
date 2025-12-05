@@ -63,14 +63,16 @@ def find_header_row(df):
             return i
     return None
 
-# ====== 資料清理函式（最大容錯） ======
+# ====== 資料清理函式（極致容錯） ======
 def clean_dataframe(df):
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
     rename_map = {}
     for col in df.columns:
         col_str = str(col)
+        # 移除所有空白、全形空白、換行、tab、括號及括號內註解
         col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', col_str)
+        col_clean = re.sub(r'（.*?）|\(.*?\)', '', col_clean)
         # 販賣名/公司 (日文)
         if '販' in col_clean and '名' in col_clean:
             rename_map[col] = '販賣名/公司 (日文)'
@@ -81,6 +83,8 @@ def clean_dataframe(df):
         elif 'No' in col_clean:
             rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
+    # debug: 顯示重命名後的欄位
+    st.write(f"重命名後欄位：{list(df.columns)}")
     # 只保留有藥品編號、販賣名、成分名的行
     if {'No.', '販賣名/公司 (日文)', '成分名 (日文)'}.issubset(df.columns):
         df = df[
