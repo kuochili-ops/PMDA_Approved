@@ -12,50 +12,63 @@ AZURE_REGION = st.secrets["AZURE_REGION"]
 
 # Microsoft Translator API 設定
 endpoint = "https://api.cognitive.microsofttranslator.com/translate"
-params = {"api-version": "3.0", "from": "ja", "to": ["zh-Hant", "en"]}
 headers = {
     "Ocp-Apim-Subscription-Key": AZURE_KEY,
     "Ocp-Apim-Subscription-Region": AZURE_REGION,
     "Content-type": "application/json"
 }
 
-# KEGG 查詢片假名主成分英文學名
-def kegg_drug_english_name(katakana_name):
-    url = f"https://rest.kegg.jp/find/drug/{katakana_name}"
+def kegg_drug_english_names(jp_name):
+    """查詢 KEGG API，回傳商品名與學名（英文），查不到則回傳空字串"""
+    url = f"https://rest.kegg.jp/find/drug/{jp_name}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.ok and resp.text:
             line = resp.text.split('\n')[0]
             fields = line.split()
             if len(fields) > 1:
-                names = fields[1].split(';')
-                # 篩選英文名稱（全英文且首字母大寫）
-                english_names = [n.strip() for n in names if n.strip().encode('utf-8').isalpha() and n.strip()[0].isupper()]
-                if english_names:
-                    return english_names[0]
-                return names
-    except Exception as e:
-        return f"查詢失敗: {e}"
-    return "查無標準學名"
+                names = [n.strip() for n in fields[1].split(';')]
+                # 商品名（英文）：通常是首字大寫且有非全大寫
+                trade_names = [n for n in names if n and n[0].isupper() and not n.isupper()]
+                # 學名（英文）：全英文且首字母大寫
+                english_names = [n for n in names if n and n[0].isupper() and n.isalpha()]
+                return {
+                    "trade_name_en_kegg": trade_names[0] if trade_names else "",
+                    "ingredient_en_kegg": english_names[0] if english_names else ""
+                }
+    except Exception:
+        pass
+    return {"trade_name_en_kegg": "", "ingredient_en_kegg": ""}
 
-# Microsoft Translator 翻譯（商品名、功效等）
-def translate_drug_info_ms(japanese_data_list):
+def ms_translator(text, from_lang="ja"):
+    """Microsoft Translator API 單句翻譯成英文"""
+    body = [{"text": text}]
+    params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
+    try:
+        resp = requests.post(endpoint, params=params, headers=headers, json=body, timeout=10)
+        if resp.ok:
+            data = resp.json()
+            return data[0]["translations"][0]["text"]
+    except Exception:
+        pass
+    return ""
+
+def ms_translator_multi(japanese_data_list):
+    """Microsoft Translator API 批次翻譯商品名、功效等（繁中、英文）"""
     results = []
     for item in japanese_data_list:
         body = [{"text": f"{item['trade_name_jp']} {item['ingredient_jp']} {item['efficacy_jp']}"}]
-        response = requests.post(endpoint, params=params, headers=headers, json=body)
-        data = response.json()[0]["translations"]
+        params = {"api-version": "3.0", "from": "ja", "to": ["zh-Hant", "en"]}
+        resp = requests.post(endpoint, params=params, headers=headers, json=body)
+        data = resp.json()[0]["translations"]
         results.append({
             "trade_name_zh": data[0]["text"],
-            "trade_name_en": data[1]["text"],
-            "ingredient_zh": data[0]["text"],
-            "ingredient_en": data[1]["text"],
+            "trade_name_en_translator": data[1]["text"],
             "efficacy_zh": data[0]["text"],
             "efficacy_en": data[1]["text"]
         })
     return results
 
-# 處理上傳檔案
 def process_uploaded_file(uploaded_file):
     try:
         filename = uploaded_file.name
@@ -94,18 +107,25 @@ def process_uploaded_file(uploaded_file):
         st.error(f"處理檔案 {uploaded_file.name} 時發生錯誤: {e}")
         return None
 
-# 整合翻譯與 KEGG 查詢
 def translate_and_combine(df):
-    # 1. 主成分查 KEGG
-    st.info("正在查詢主成分英文學名（KEGG API）...")
+    st.info("正在查詢主成分與商品名英文（KEGG→Microsoft Translator）...")
+    trade_name_en_list = []
     ingredient_en_list = []
     for idx, row in df.iterrows():
-        jp_name = row['Ingredient_JP']
-        en_name = kegg_drug_english_name(jp_name)
-        ingredient_en_list.append(en_name)
-        time.sleep(0.34)  # 控制速率，避免被 KEGG 封鎖
+        # 先查 KEGG
+        kegg_result = kegg_drug_english_names(row['Trade_Name_JP'])
+        trade_name_en = kegg_result["trade_name_en_kegg"]
+        ingredient_en = kegg_result["ingredient_en_kegg"]
+        # 若查不到再用 Microsoft Translator
+        if not trade_name_en:
+            trade_name_en = ms_translator(row['Trade_Name_JP'])
+        if not ingredient_en:
+            ingredient_en = ms_translator(row['Ingredient_JP'])
+        trade_name_en_list.append(trade_name_en)
+        ingredient_en_list.append(ingredient_en)
+        time.sleep(0.34)  # KEGG 頻率限制
 
-    # 2. 其他欄位用 Microsoft Translator
+    # 其他欄位翻譯
     data_for_translation = df.apply(
         lambda row: {
             'trade_name_jp': row['Trade_Name_JP'],
@@ -115,23 +135,22 @@ def translate_and_combine(df):
         axis=1
     ).tolist()
     st.info(f"正在翻譯 {len(data_for_translation)} 筆藥品資料（商品名、功效）...")
-    translated_results = translate_drug_info_ms(data_for_translation)
+    translated_results = ms_translator_multi(data_for_translation)
     df_translated = pd.DataFrame(translated_results)
 
-    # 3. 合併結果
+    # 合併結果
     final_df = pd.concat([df.reset_index(drop=True), df_translated.reset_index(drop=True)], axis=1)
+    final_df['Trade Name/Company (English)'] = trade_name_en_list
     final_df['Ingredient Name (English)'] = ingredient_en_list
 
-    # 4. 欄位顯示名稱
+    # 欄位顯示名稱
     display_names = {
         'Category': '分野 (Category)',
         'Approval_Date': '承認日',
         'No': 'No.',
         'Trade_Name_JP': '販賣名/公司 (日文)',
-        'trade_name_zh': '商品名稱/公司 (中文)',
-        'trade_name_en': 'Trade Name/Company (English)',
+        'Trade Name/Company (English)': 'Trade Name/Company (English)',
         'Ingredient_JP': '成分名 (日文)',
-        'ingredient_zh': '成分名稱 (中文)',
         'Ingredient Name (English)': 'Ingredient Name (English)',
         'Approval_Type': '承認類型',
         'Efficacy_JP': '功效・效果 (日文)',
@@ -139,9 +158,15 @@ def translate_and_combine(df):
         'efficacy_en': 'Efficacy/Effects (English)'
     }
     final_df = final_df.rename(columns=display_names)
+    # 只保留需要的欄位
+    keep_cols = [
+        '分野 (Category)', '承認日', 'No.', '販賣名/公司 (日文)', 'Trade Name/Company (English)',
+        '成分名 (日文)', 'Ingredient Name (English)', '承認類型',
+        '功效・效果 (日文)', '功效・效果 (中文)', 'Efficacy/Effects (English)'
+    ]
+    final_df = final_df[[col for col in keep_cols if col in final_df.columns]]
     return final_df
 
-# Streamlit 主程式
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (KEGG+Microsoft Translator 版)")
@@ -175,4 +200,3 @@ def main():
                             )
 
 if __name__ == "__main__":
-    main()
