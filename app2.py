@@ -49,35 +49,36 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 強化自動尋找欄位名稱行（含 debug 輸出） ======
+# ====== 強化自動尋找欄位名稱行 ======
 def find_header_row(df):
-    st.write("=== 欄位名稱偵測 debug ===")
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
         row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
-        st.write(f"{i}: {row_str_clean}")
+        # 放寬條件：同時有「名」字出現2次以上，且有「成」和「販」字
         if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
-            st.write(f"→ 偵測到欄位名稱行（index={i}）")
             return i
+        # 或同時有「成分名」和「販賣名」的任何變形
         if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
            and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
-            st.write(f"→ 偵測到欄位名稱行（index={i}）")
             return i
-    st.write("→ 沒有偵測到欄位名稱行")
     return None
 
-# ====== 資料清理函式（強化版） ======
+# ====== 資料清理函式（最大容錯） ======
 def clean_dataframe(df):
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
     rename_map = {}
     for col in df.columns:
-        col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', str(col))
-        if re.match(r'^販.*売.*名.*', col_clean):
+        col_str = str(col)
+        col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', col_str)
+        # 販賣名/公司 (日文)
+        if '販' in col_clean and '名' in col_clean:
             rename_map[col] = '販賣名/公司 (日文)'
-        elif re.match(r'^成.*分.*名.*', col_clean):
+        # 成分名 (日文)
+        elif '成' in col_clean and '名' in col_clean:
             rename_map[col] = '成分名 (日文)'
-        elif re.match(r'^No\\.?$', col_clean):
+        # No.
+        elif 'No' in col_clean:
             rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
     # 只保留有藥品編號、販賣名、成分名的行
@@ -90,7 +91,7 @@ def clean_dataframe(df):
     elif '成分名 (日文)' in df.columns:
         df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     else:
-        df = pd.DataFrame()  # 沒有主要欄位就回傳空表
+        df = pd.DataFrame()
     # 去除全空白行
     if not df.empty:
         df = df.dropna(how='all')
@@ -98,13 +99,13 @@ def clean_dataframe(df):
         df = df.reset_index(drop=True)
     return df
 
-# ====== 分頁另存 CSV（自動尋找欄位名稱行，含 debug 輸出） ======
+# ====== 分頁另存 CSV（自動尋找欄位名稱行） ======
 def save_sheets_to_csv_auto_header(uploaded_file):
     xls = pd.ExcelFile(uploaded_file)
     sheet_map = {}
     for sheet_name in xls.sheet_names:
-        st.write(f"=== 分頁「{sheet_name}」原始資料預覽 ===")
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        st.write(f"分頁「{sheet_name}」原始資料預覽：")
         st.dataframe(raw_df.head(15))
         header_row = find_header_row(raw_df)
         if header_row is None:
@@ -166,7 +167,7 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份（debug 版）...")
+        st.info("正在自動分割各月份（最大容錯）...")
         month_csv_map = save_sheets_to_csv_auto_header(uploaded_file)
         if not month_csv_map:
             st.warning("未偵測到任何有效分頁。")
