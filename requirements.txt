@@ -4,3 +4,4 @@ rapidfuzz
 xlsxwriter
 openpyxl
 requests
+beautifulsoup4
