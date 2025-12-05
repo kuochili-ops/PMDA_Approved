@@ -66,3 +66,4 @@ if uploaded_file:
             data=csv,
             file_name="drug_list_with_pubchem.csv",
             mime='text/csv'
+        )
