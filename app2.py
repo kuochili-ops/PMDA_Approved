@@ -1,31 +1,28 @@
 
-ingredient_col = None
-for col in df.columns:
-    if "成分" in col.replace(" ", ""):  # 去除空格後比對
-        ingredient_col = col
-        break
+import streamlit as st
+import pandas as pd
 
-if not ingredient_col:
-    st.error("找不到成分名相關欄位，請確認檔案格式。")
-else:
-    st.success(f"偵測到成分名欄位：{ingredient_col}")
-    # 以下照原流程查詢 PubChem
-    df['PubChem_Synonyms'] = ""
-    df['PubChem_IUPAC'] = ""
-    for idx, row in df.iterrows():
-        name = str(row[ingredient_col])
-        if pd.isna(name) or name.strip() == "":
-            continue
-        synonyms = get_pubchem_synonyms(name)
-        iupac = get_pubchem_iupac(name)
-        df.at[idx, 'PubChem_Synonyms'] = synonyms
-        df.at[idx, 'PubChem_IUPAC'] = iupac
-        time.sleep(0.5)
-    st.dataframe(df)
-    csv = df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="下載查詢結果 CSV",
-        data=csv,
-        file_name="drug_list_with_pubchem.csv",
-        mime='text/csv'
-    )
+st.title("藥品成分 PubChem 學名查詢工具")
+
+uploaded_file = st.file_uploader("請上傳藥品清單檔案（Excel 或 CSV）", type=['xlsx', 'xls', 'csv'])
+
+if uploaded_file:
+    # 先讀取檔案，產生 df
+    if uploaded_file.name.endswith('.csv'):
+        df = pd.read_csv(uploaded_file)
+    else:
+        df = pd.read_excel(uploaded_file)
+    st.write("所有欄位名稱：", df.columns.tolist())
+
+    # 再進行欄位偵測
+    ingredient_col = None
+    for col in df.columns:
+        if "成分" in col.replace(" ", ""):
+            ingredient_col = col
+            break
+
+    if not ingredient_col:
+        st.error("找不到成分名相關欄位，請確認檔案格式。")
+    else:
+        st.success(f"偵測到成分名欄位：{ingredient_col}")
+        # 這裡可以繼續進行 PubChem 查詢流程
