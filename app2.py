@@ -54,41 +54,46 @@ def find_header_row(df):
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
         row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
-        # 放寬條件：同時有「名」字出現2次以上，且有「成」和「販」字
         if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
             return i
-        # 或同時有「成分名」和「販賣名」的任何變形
         if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
            and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
             return i
     return None
 
 # ====== 資料清理函式（極致容錯） ======
+def is_number(val):
+    try:
+        # 支援半形、全形數字、float
+        val_str = str(val).strip()
+        val_str = val_str.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
+        float(val_str)
+        return True
+    except:
+        return False
+
 def clean_dataframe(df):
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
     rename_map = {}
     for col in df.columns:
         col_str = str(col)
-        # 移除所有空白、全形空白、換行、tab、括號及括號內註解
         col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', col_str)
         col_clean = re.sub(r'（.*?）|\(.*?\)', '', col_clean)
-        # 販賣名/公司 (日文)
         if '販' in col_clean and '名' in col_clean:
             rename_map[col] = '販賣名/公司 (日文)'
-        # 成分名 (日文)
         elif '成' in col_clean and '名' in col_clean:
             rename_map[col] = '成分名 (日文)'
-        # No.
         elif 'No' in col_clean:
             rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
-    # debug: 顯示重命名後的欄位
     st.write(f"重命名後欄位：{list(df.columns)}")
+    if 'No.' in df.columns:
+        st.write("No. 欄位前 20 筆：", df['No.'].head(20).tolist())
     # 只保留有藥品編號、販賣名、成分名的行
     if {'No.', '販賣名/公司 (日文)', '成分名 (日文)'}.issubset(df.columns):
         df = df[
-            df['No.'].apply(lambda x: str(x).strip().isdigit()) &
+            df['No.'].apply(is_number) &
             df['販賣名/公司 (日文)'].astype(str).str.strip().ne('') &
             df['成分名 (日文)'].astype(str).str.strip().ne('')
         ]
@@ -96,7 +101,6 @@ def clean_dataframe(df):
         df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     else:
         df = pd.DataFrame()
-    # 去除全空白行
     if not df.empty:
         df = df.dropna(how='all')
         df = df[~(df.applymap(lambda x: str(x).strip() == '').all(axis=1))]
