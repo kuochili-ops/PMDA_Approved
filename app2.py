@@ -5,6 +5,7 @@ import requests
 import re
 import time
 import os
+import openpyxl
 
 # ====== API 金鑰設定 ======
 AZURE_KEY = st.secrets["AZURE_KEY"]
@@ -49,16 +50,42 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 資料清理函式 ======
+# ====== 取得分頁列印範圍 ======
+def get_print_area(sheet):
+    area = sheet.print_area
+    if area:
+        # openpyxl 3.1+ print_area 會是 tuple
+        if isinstance(area, (list, tuple)):
+            area = area[0]
+        return area
+    return None
 
+def read_print_area_to_df(xls_path, sheet_name):
+    wb = openpyxl.load_workbook(xls_path, data_only=True)
+    ws = wb[sheet_name]
+    area = get_print_area(ws)
+    if not area:
+        return None  # 沒有設定列印範圍
+    min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(area)
+    data = []
+    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True):
+        data.append(row)
+    if not data or len(data) < 2:
+        return None
+    df = pd.DataFrame(data[1:], columns=data[0])
+    return df
+
+# ====== 資料清理函式（強化版） ======
 def clean_dataframe(df):
+    if not isinstance(df, pd.DataFrame):
+        return pd.DataFrame()
     rename_map = {}
     for col in df.columns:
-        if re.match(r'^販.*売.*名.*', col):
+        if re.match(r'^販.*売.*名.*', str(col)):
             rename_map[col] = '販賣名/公司 (日文)'
-        elif re.match(r'^成.*分.*名.*', col):
+        elif re.match(r'^成.*分.*名.*', str(col)):
             rename_map[col] = '成分名 (日文)'
-        elif re.match(r'^No\\.?$', col):
+        elif re.match(r'^No\\.?$', str(col)):
             rename_map[col] = 'No.'
     df = df.rename(columns=rename_map)
     # 只保留有藥品編號、販賣名、成分名的行
@@ -68,20 +95,29 @@ def clean_dataframe(df):
             df['販賣名/公司 (日文)'].astype(str).str.strip().ne('') &
             df['成分名 (日文)'].astype(str).str.strip().ne('')
         ]
+    elif '成分名 (日文)' in df.columns:
+        df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     else:
-        # 備用：只保留成分名非空
-        if '成分名 (日文)' in df.columns:
-            df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
-    df = df.reset_index(drop=True)
+        df = pd.DataFrame()  # 沒有主要欄位就回傳空表
+    # 去除全空白行
+    if not df.empty:
+        df = df.dropna(how='all')
+        df = df[~(df.applymap(lambda x: str(x).strip() == '').all(axis=1))]
+        df = df.reset_index(drop=True)
+    return df
 
-
-# ====== 分頁另存 CSV（最佳化：先清理） ======
-def save_sheets_to_csv(uploaded_file):
-    xls = pd.ExcelFile(uploaded_file)
+# ====== 分頁另存 CSV（只處理列印範圍） ======
+def save_sheets_to_csv_by_print_area(uploaded_file):
+    wb = openpyxl.load_workbook(uploaded_file, data_only=True)
     sheet_map = {}
-    for sheet_name in xls.sheet_names:
-        raw_df = pd.read_excel(xls, sheet_name)
-        df = clean_dataframe(raw_df)
+    for sheet_name in wb.sheetnames:
+        df = read_print_area_to_df(uploaded_file, sheet_name)
+        if df is None or df.empty:
+            st.write(f"分頁「{sheet_name}」無有效資料或未設定列印範圍，已跳過。")
+            continue
+        raw_count = len(df)
+        df = clean_dataframe(df)
+        clean_count = len(df)
         # 嘗試找月份
         month_match = re.search(r'(\d+)月', sheet_name)
         if not month_match:
@@ -96,7 +132,7 @@ def save_sheets_to_csv(uploaded_file):
             month = sheet_name
         csv_name = f"{month}.csv"
         df.to_csv(csv_name, index=False, encoding="utf-8")
-        sheet_map[month] = (csv_name, len(raw_df), len(df))  # 加入原始/清理後筆數
+        sheet_map[month] = (csv_name, raw_count, clean_count)
     return sheet_map
 
 # ====== 翻譯主流程 ======
@@ -128,15 +164,18 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份...")
-        month_csv_map = save_sheets_to_csv(uploaded_file)
+        st.info("正在自動分割各月份（僅處理分頁列印範圍）...")
+        month_csv_map = save_sheets_to_csv_by_print_area(uploaded_file)
         if not month_csv_map:
-            st.warning("未偵測到任何月份分頁。")
+            st.warning("未偵測到任何有效分頁或分頁未設定列印範圍。")
             return
         for month, (csv_name, raw_count, clean_count) in month_csv_map.items():
             st.subheader(f"{month} 翻譯結果")
-            st.write(f"原始筆數：{raw_count}，清理後：{clean_count}")
+            st.write(f"列印範圍原始筆數：{raw_count}，清理後：{clean_count}")
             df = pd.read_csv(csv_name, encoding="utf-8")
+            if df.empty:
+                st.warning(f"{month} 無有效資料，已跳過。")
+                continue
             translated_df = translate_and_combine(df)
             st.dataframe(translated_df, use_container_width=True, hide_index=True)
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
