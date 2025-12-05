@@ -66,7 +66,12 @@ def read_print_area_to_df(xls_path, sheet_name):
     area = get_print_area(ws)
     if not area:
         return None  # 沒有設定列印範圍
-    min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(area)
+    # 處理多個範圍，只取第一個
+    area = str(area).split(',')[0]
+    try:
+        min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(area)
+    except ValueError:
+        return None
     data = []
     for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True):
         data.append(row)
@@ -113,7 +118,7 @@ def save_sheets_to_csv_by_print_area(uploaded_file):
     for sheet_name in wb.sheetnames:
         df = read_print_area_to_df(uploaded_file, sheet_name)
         if df is None or df.empty:
-            st.write(f"分頁「{sheet_name}」無有效資料或未設定列印範圍，已跳過。")
+            st.write(f"分頁「{sheet_name}」無有效資料或未設定列印範圍/格式異常，已跳過。")
             continue
         raw_count = len(df)
         df = clean_dataframe(df)
