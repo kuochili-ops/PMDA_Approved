@@ -5,7 +5,12 @@ import requests
 import re
 import time
 import os
+#
 
+st.write(f"分頁「{sheet_name}」原始資料：")
+st.dataframe(raw_df)
+
+#
 # ====== API 金鑰設定 ======
 AZURE_KEY = st.secrets["AZURE_KEY"]
 AZURE_REGION = st.secrets["AZURE_REGION"]
