@@ -5,12 +5,7 @@ import requests
 import re
 import time
 import os
-#
 
-st.write(f"分頁「{sheet_name}」原始資料：")
-st.dataframe(raw_df)
-
-#
 # ====== API 金鑰設定 ======
 AZURE_KEY = st.secrets["AZURE_KEY"]
 AZURE_REGION = st.secrets["AZURE_REGION"]
@@ -54,6 +49,14 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
+# ====== 自動尋找欄位名稱行 ======
+def find_header_row(df):
+    for i, row in df.iterrows():
+        row_str = ''.join([str(cell) for cell in row])
+        if '成分名' in row_str and '販' in row_str:
+            return i
+    return None
+
 # ====== 資料清理函式（強化版） ======
 def clean_dataframe(df):
     if not isinstance(df, pd.DataFrame):
@@ -85,21 +88,19 @@ def clean_dataframe(df):
         df = df.reset_index(drop=True)
     return df
 
-# ====== 分頁另存 CSV（pandas 讀取第3列為欄位名） ======
-def save_sheets_to_csv_by_header3(uploaded_file):
+# ====== 分頁另存 CSV（自動尋找欄位名稱行） ======
+def save_sheets_to_csv_auto_header(uploaded_file):
     xls = pd.ExcelFile(uploaded_file)
     sheet_map = {}
     for sheet_name in xls.sheet_names:
-        try:
-            raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=2)  # 第3列為欄位名
-        except Exception as e:
-            st.write(f"分頁「{sheet_name}」讀取失敗：{e}")
+        raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        header_row = find_header_row(raw_df)
+        if header_row is None:
+            st.write(f"分頁「{sheet_name}」找不到欄位名稱，已跳過。")
             continue
-        if raw_df is None or raw_df.empty:
-            st.write(f"分頁「{sheet_name}」無原始資料，已跳過。")
-            continue
-        raw_count = len(raw_df)
-        df = clean_dataframe(raw_df)
+        df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+        raw_count = len(df)
+        df = clean_dataframe(df)
         clean_count = len(df)
         if df is None or df.empty:
             st.write(f"分頁「{sheet_name}」無有效資料，已跳過。")
@@ -150,8 +151,8 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份（以第3列為欄位名）...")
-        month_csv_map = save_sheets_to_csv_by_header3(uploaded_file)
+        st.info("正在自動分割各月份（自動尋找欄位名稱行）...")
+        month_csv_map = save_sheets_to_csv_auto_header(uploaded_file)
         if not month_csv_map:
             st.warning("未偵測到任何有效分頁。")
             return
