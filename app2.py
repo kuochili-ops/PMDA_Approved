@@ -6,7 +6,7 @@ import re
 import time
 import os
 
-# ====== API 金鑰設定（請填入你自己的） ======
+# ====== API 金鑰設定 ======
 AZURE_KEY = st.secrets["AZURE_KEY"]
 AZURE_REGION = st.secrets["AZURE_REGION"]
 endpoint = "https://api.cognitive.microsofttranslator.com/translate"
@@ -50,9 +50,7 @@ def ms_translator(text, from_lang="ja"):
     return ""
 
 # ====== 資料清理函式 ======
-
 def clean_dataframe(df):
-    # 欄位標準化
     rename_map = {}
     for col in df.columns:
         if re.match(r'^販.*売.*名.*', col):
@@ -73,10 +71,33 @@ def clean_dataframe(df):
     df = df.reset_index(drop=True)
     return df
 
-# ====== 翻譯主流程，含進度顯示 ======
+# ====== 分頁另存 CSV（最佳化：先清理） ======
+def save_sheets_to_csv(uploaded_file):
+    xls = pd.ExcelFile(uploaded_file)
+    sheet_map = {}
+    for sheet_name in xls.sheet_names:
+        raw_df = pd.read_excel(xls, sheet_name)
+        df = clean_dataframe(raw_df)
+        # 嘗試找月份
+        month_match = re.search(r'(\d+)月', sheet_name)
+        if not month_match:
+            for col in df.columns:
+                m = re.search(r'(\d+)月', str(col))
+                if m:
+                    month_match = m
+                    break
+        if month_match:
+            month = month_match.group(1) + "月"
+        else:
+            month = sheet_name
+        csv_name = f"{month}.csv"
+        df.to_csv(csv_name, index=False, encoding="utf-8")
+        sheet_map[month] = (csv_name, len(raw_df), len(df))  # 加入原始/清理後筆數
+    return sheet_map
+
+# ====== 翻譯主流程 ======
 def translate_and_combine(df):
-    df = clean_dataframe(df)
-    st.write(f"本月份共 {len(df)} 筆")
+    st.write(f"清理後有效資料共 {len(df)} 筆")
     trade_name_en_list = []
     ingredient_en_list = []
     progress = st.empty()
@@ -97,29 +118,6 @@ def translate_and_combine(df):
     df['Ingredient Name (English)'] = ingredient_en_list
     return df
 
-# ====== 分頁另存 CSV ======
-def save_sheets_to_csv(uploaded_file):
-    xls = pd.ExcelFile(uploaded_file)
-    sheet_map = {}
-    for sheet_name in xls.sheet_names:
-        df = pd.read_excel(xls, sheet_name)
-        # 嘗試找月份
-        month_match = re.search(r'(\d+)月', sheet_name)
-        if not month_match:
-            for col in df.columns:
-                m = re.search(r'(\d+)月', str(col))
-                if m:
-                    month_match = m
-                    break
-        if month_match:
-            month = month_match.group(1) + "月"
-        else:
-            month = sheet_name
-        csv_name = f"{month}.csv"
-        df.to_csv(csv_name, index=False, encoding="utf-8")
-        sheet_map[month] = csv_name
-    return sheet_map
-
 # ====== Streamlit 主程式 ======
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
@@ -131,8 +129,9 @@ def main():
         if not month_csv_map:
             st.warning("未偵測到任何月份分頁。")
             return
-        for month, csv_name in month_csv_map.items():
+        for month, (csv_name, raw_count, clean_count) in month_csv_map.items():
             st.subheader(f"{month} 翻譯結果")
+            st.write(f"原始筆數：{raw_count}，清理後：{clean_count}")
             df = pd.read_csv(csv_name, encoding="utf-8")
             translated_df = translate_and_combine(df)
             st.dataframe(translated_df, use_container_width=True, hide_index=True)
@@ -144,7 +143,6 @@ def main():
                 mime='text/csv'
             )
             os.remove(csv_name)
-
 
 if __name__ == "__main__":
     main()
