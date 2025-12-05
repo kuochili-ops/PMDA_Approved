@@ -74,4 +74,7 @@ if uploaded_file is not None:
         file_name="商品名_公司名_成分英文名分欄.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
 else:
+    st.warning("請先上傳檔案！")
+
