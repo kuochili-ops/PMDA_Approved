@@ -49,19 +49,21 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 強化自動尋找欄位名稱行 ======
+# ====== 強化自動尋找欄位名稱行（含 debug 輸出） ======
 def find_header_row(df):
+    st.write("=== 欄位名稱偵測 debug ===")
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
-        # 移除所有空白、全形空白、換行、tab
         row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
-        # 放寬條件：同時有「名」字出現2次以上，且有「成」和「販」字
+        st.write(f"{i}: {row_str_clean}")
         if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
+            st.write(f"→ 偵測到欄位名稱行（index={i}）")
             return i
-        # 或同時有「成分名」和「販賣名」的任何變形
         if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
            and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
+            st.write(f"→ 偵測到欄位名稱行（index={i}）")
             return i
+    st.write("→ 沒有偵測到欄位名稱行")
     return None
 
 # ====== 資料清理函式（強化版） ======
@@ -96,20 +98,25 @@ def clean_dataframe(df):
         df = df.reset_index(drop=True)
     return df
 
-# ====== 分頁另存 CSV（自動尋找欄位名稱行） ======
+# ====== 分頁另存 CSV（自動尋找欄位名稱行，含 debug 輸出） ======
 def save_sheets_to_csv_auto_header(uploaded_file):
     xls = pd.ExcelFile(uploaded_file)
     sheet_map = {}
     for sheet_name in xls.sheet_names:
+        st.write(f"=== 分頁「{sheet_name}」原始資料預覽 ===")
         raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+        st.dataframe(raw_df.head(15))
         header_row = find_header_row(raw_df)
         if header_row is None:
             st.write(f"分頁「{sheet_name}」找不到欄位名稱，已跳過。")
             continue
         df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
+        st.write(f"分頁「{sheet_name}」偵測到欄位名稱行 index={header_row}，實際欄位名稱：{list(df.columns)}")
         raw_count = len(df)
+        st.write(f"分頁「{sheet_name}」清理前筆數：{raw_count}")
         df = clean_dataframe(df)
         clean_count = len(df)
+        st.write(f"分頁「{sheet_name}」清理後筆數：{clean_count}")
         if df is None or df.empty:
             st.write(f"分頁「{sheet_name}」無有效資料，已跳過。")
             continue
@@ -159,7 +166,7 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份（強化自動尋找欄位名稱行）...")
+        st.info("正在自動分割各月份（debug 版）...")
         month_csv_map = save_sheets_to_csv_auto_header(uploaded_file)
         if not month_csv_map:
             st.warning("未偵測到任何有效分頁。")
