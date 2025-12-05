@@ -50,31 +50,20 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 取得分頁列印範圍 ======
-def get_print_area(sheet):
-    area = sheet.print_area
-    if area:
-        # openpyxl 3.1+ print_area 會是 tuple
-        if isinstance(area, (list, tuple)):
-            area = area[0]
-        return area
-    return None
-
-def read_print_area_to_df(xls_path, sheet_name):
+# ====== 自動偵測有資料區塊 ======
+def read_data_block_to_df(xls_path, sheet_name):
     wb = openpyxl.load_workbook(xls_path, data_only=True)
     ws = wb[sheet_name]
-    area = get_print_area(ws)
-    if not area:
-        return None  # 沒有設定列印範圍
-    # 處理多個範圍，只取第一個
-    area = str(area).split(',')[0]
-    try:
-        min_col, min_row, max_col, max_row = openpyxl.utils.range_boundaries(area)
-    except ValueError:
-        return None
-    data = []
-    for row in ws.iter_rows(min_row=min_row, max_row=max_row, min_col=min_col, max_col=max_col, values_only=True):
-        data.append(row)
+    rows = list(ws.iter_rows(values_only=True))
+    # 找到第一列非全空白
+    start = 0
+    while start < len(rows) and all((cell is None or str(cell).strip() == '') for cell in rows[start]):
+        start += 1
+    # 找到結束列
+    end = start
+    while end < len(rows) and not all((cell is None or str(cell).strip() == '') for cell in rows[end]):
+        end += 1
+    data = rows[start:end]
     if not data or len(data) < 2:
         return None
     df = pd.DataFrame(data[1:], columns=data[0])
@@ -111,14 +100,14 @@ def clean_dataframe(df):
         df = df.reset_index(drop=True)
     return df
 
-# ====== 分頁另存 CSV（只處理列印範圍） ======
-def save_sheets_to_csv_by_print_area(uploaded_file):
+# ====== 分頁另存 CSV（自動偵測有資料區塊） ======
+def save_sheets_to_csv_by_data_block(uploaded_file):
     wb = openpyxl.load_workbook(uploaded_file, data_only=True)
     sheet_map = {}
     for sheet_name in wb.sheetnames:
-        df = read_print_area_to_df(uploaded_file, sheet_name)
+        df = read_data_block_to_df(uploaded_file, sheet_name)
         if df is None or df.empty:
-            st.write(f"分頁「{sheet_name}」無有效資料或未設定列印範圍/格式異常，已跳過。")
+            st.write(f"分頁「{sheet_name}」無有效資料，已跳過。")
             continue
         raw_count = len(df)
         df = clean_dataframe(df)
@@ -169,14 +158,14 @@ def main():
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
     uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
     if uploaded_file:
-        st.info("正在自動分割各月份（僅處理分頁列印範圍）...")
-        month_csv_map = save_sheets_to_csv_by_print_area(uploaded_file)
+        st.info("正在自動分割各月份（自動偵測分頁有資料區塊）...")
+        month_csv_map = save_sheets_to_csv_by_data_block(uploaded_file)
         if not month_csv_map:
-            st.warning("未偵測到任何有效分頁或分頁未設定列印範圍。")
+            st.warning("未偵測到任何有效分頁。")
             return
         for month, (csv_name, raw_count, clean_count) in month_csv_map.items():
             st.subheader(f"{month} 翻譯結果")
-            st.write(f"列印範圍原始筆數：{raw_count}，清理後：{clean_count}")
+            st.write(f"資料區塊原始筆數：{raw_count}，清理後：{clean_count}")
             df = pd.read_csv(csv_name, encoding="utf-8")
             if df.empty:
                 st.warning(f"{month} 無有效資料，已跳過。")
