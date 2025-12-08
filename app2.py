@@ -20,24 +20,36 @@ headers = {
 def get_kegg_trade_name_and_japic(jp_name):
     """
     Attempts to find the KEGG English Trade Name (欧文商標名) and JAPIC code 
-    for a given Japanese drug name by scraping the KEGG search page.
+    for a given Japanese drug name by scraping the KEGG search page, then the drug page.
     """
-    url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
+    # 1. Search KEGG for the drug name
+    search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
+    japic_code = None
+    trade_name = ""
+    
     try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok:
-            # 1. Extract JAPIC Code (japic_code=XXXXX)
-            japic_match = re.search(r'japic_code=(\d+)', resp.text)
-            japic_code = japic_match.group(1) if japic_match else None
-            
-            # 2. Extract English Trade Name (欧文商標名)
-            # Using a more flexible, non-greedy pattern (.*?)(?=<) to capture up to the next tag
-            trade_match = re.search(r'欧文商標名</span>\s*:\s*(.*?)(?=<)', resp.text, re.DOTALL)
-            trade_name = trade_match.group(1).strip() if trade_match else ""
-            
-            return japic_code, trade_name
+        search_resp = requests.get(search_url, timeout=10)
+        if search_resp.ok:
+            # 2. Extract JAPIC Code from the search result page
+            japic_match = re.search(r'japic_code=(\d+)', search_resp.text)
+            if japic_match:
+                japic_code = japic_match.group(1)
+                
+                # 3. Send a SECOND REQUEST to the specific drug page
+                drug_url = f"https://www.kegg.jp/medicus-bin/japicmed?japiccode={japic_code}"
+                drug_resp = requests.get(drug_url, timeout=10)
+                
+                if drug_resp.ok:
+                    # 4. Extract English Trade Name (欧文商標名) from the specific drug page
+                    # 使用更穩健的正規表達式 (.*?)(?=<) 來捕獲內容
+                    trade_match = re.search(r'欧文商標名</span>\s*:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
+                    trade_name = trade_match.group(1).strip() if trade_match else ""
+                    
+                    return japic_code, trade_name.strip()
     except Exception:
+        # Catch any request or parsing errors
         pass
+        
     return None, ""
 
 # --- Translator Function ---
