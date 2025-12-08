@@ -16,9 +16,47 @@ headers = {
     "Content-type": "application/json"
 }
 
+# ====== KEGG 搜尋頁抓歐文商標名 ======
+def get_kegg_trade_name_from_search(jp_name):
+    url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.ok:
+            match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
+            if match:
+                return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+# ====== 商品詳細頁抓歐文商標名 ======
+def get_kegg_official_trade_name_product(japic_code):
+    url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={japic_code}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.ok:
+            match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
+            if match:
+                return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+# ====== 詳細頁抓歐文商標名 ======
+def get_kegg_official_trade_name(japic_code):
+    url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
+    try:
+        resp = requests.get(url, timeout=10)
+        if resp.ok:
+            match = re.search(r'欧文商標名</th>\s*<td[^>]*>(.*?)</td>', resp.text, re.DOTALL)
+            if match:
+                return match.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
 # ====== 商品名多策略查詢 JAPIC code ======
 def get_japic_code_by_kegg(jp_name):
-    # 原名查詢
     url = f"https://rest.kegg.jp/find/drug/{jp_name}"
     try:
         resp = requests.get(url, timeout=10)
@@ -42,20 +80,6 @@ def get_japic_code_by_kegg(jp_name):
         except Exception:
             pass
     return None
-
-# ====== KEGG 詳細頁抓官方英文商標名 ======
-
-def get_kegg_trade_name(japic_code):
-    # 先查 product 頁面
-    trade_name = get_kegg_official_trade_name_product(japic_code)
-    if trade_name:
-        return trade_name, "KEGG"
-    # 再查詳細頁
-    trade_name = get_kegg_official_trade_name(japic_code)
-    if trade_name:
-        return trade_name, "KEGG"
-    return "", ""
-
 
 # ====== Microsoft Translator API ======
 def ms_translator(text, from_lang="ja"):
@@ -164,7 +188,7 @@ def save_sheets_to_csv_auto_header(uploaded_file):
         sheet_map[month] = (csv_name, raw_count, clean_count)
     return sheet_map
 
-# ====== 翻譯主流程（優先 KEGG 詳細頁歐文商標名） ======
+# ====== 翻譯主流程（優先 KEGG 各頁歐文商標名） ======
 def translate_and_combine(df):
     st.write(f"清理後有效資料共 {len(df)} 筆")
     trade_name_en_list = []
@@ -175,15 +199,26 @@ def translate_and_combine(df):
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
         jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
-        # 多策略查詢 JAPIC code
-        japic_code = get_japic_code_by_kegg(jp_trade_name_raw)
-        trade_name_en = ""
+        # 1. 先查搜尋頁
+        trade_name_en = get_kegg_trade_name_from_search(jp_trade_name_raw)
         trade_name_source = ""
-        if japic_code:
-            trade_name_en = get_kegg_official_trade_name(japic_code)
-            if trade_name_en:
-                trade_name_source = "KEGG"
-        # 若查不到再用 Microsoft Translator
+        japic_code = None
+        if trade_name_en:
+            trade_name_source = "KEGG搜尋頁"
+        else:
+            # 2. 查 JAPIC code
+            japic_code = get_japic_code_by_kegg(jp_trade_name_raw)
+            # 3. 查商品詳細頁
+            if japic_code:
+                trade_name_en = get_kegg_official_trade_name_product(japic_code)
+                if trade_name_en:
+                    trade_name_source = "KEGG商品頁"
+                else:
+                    # 4. 查詳細頁
+                    trade_name_en = get_kegg_official_trade_name(japic_code)
+                    if trade_name_en:
+                        trade_name_source = "KEGG詳細頁"
+        # 5. 都查不到才用翻譯
         if not trade_name_en:
             trade_name_en = ms_translator(jp_trade_name_raw)
             trade_name_source = "自動翻譯"
