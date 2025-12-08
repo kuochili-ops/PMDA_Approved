@@ -238,10 +238,15 @@ def translate_and_combine(df):
     return df
 
 # ====== 高亮 KEGG 結果（綠色字體） ======
-def highlight_kegg(val, source):
-    if source.startswith("KEGG"):
-        return 'color: green; font-weight: bold'
-    return ''
+def highlight_kegg_col(col):
+    # col 是英文商標名欄位的 Series
+    # 需根據來源欄位判斷
+    # 這裡假設 DataFrame 有 'Trade Name/Company (來源)' 欄位
+    # 需在 apply 時傳入來源欄位
+    return [
+        'color: green; font-weight: bold' if source.startswith("KEGG") else ''
+        for source in col.index.map(lambda idx: col._parent.loc[idx, 'Trade Name/Company (來源)'])
+    ]
 
 # ====== Streamlit 主程式 ======
 def main():
@@ -264,8 +269,8 @@ def main():
             translated_df = translate_and_combine(df)
             # 高亮 KEGG 結果
             styled_df = translated_df.style.apply(
-                lambda x: [highlight_kegg(v, s) for v, s in zip(x['Trade Name/Company (English)'], x['Trade Name/Company (來源)'])],
-                axis=1, subset=['Trade Name/Company (English)']
+                highlight_kegg_col,
+                subset=['Trade Name/Company (English)']
             )
             st.dataframe(styled_df, use_container_width=True, hide_index=True)
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
