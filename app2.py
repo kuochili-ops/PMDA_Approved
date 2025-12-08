@@ -17,35 +17,28 @@ headers = {
 }
 
 # --- KEGG Function ---
-
-def get_kegg_japic_code(jp_name):
+def get_kegg_trade_name_and_japic(jp_name):
+    """
+    Attempts to find the KEGG English Trade Name (欧文商標名) and JAPIC code 
+    for a given Japanese drug name by scraping the KEGG search page.
+    """
     url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.ok:
-            match = re.search(r'japic_code=(\d+)', resp.text)
-            if match:
-                return match.group(1)
+            # 1. Extract JAPIC Code (japic_code=XXXXX)
+            japic_match = re.search(r'japic_code=(\d+)', resp.text)
+            japic_code = japic_match.group(1) if japic_match else None
+            
+            # 2. Extract English Trade Name (欧文商標名)
+            # Using a more flexible, non-greedy pattern (.*?)(?=<) to capture up to the next tag
+            trade_match = re.search(r'欧文商標名</span>\s*:\s*(.*?)(?=<)', resp.text, re.DOTALL)
+            trade_name = trade_match.group(1).strip() if trade_match else ""
+            
+            return japic_code, trade_name
     except Exception:
         pass
-    return None
-
-def get_kegg_official_trade_name(japic_code):
-    url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok:
-            match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
-            if match:
-                return match.group(1).strip()
-            # 或解析 <th>欧文商標名</th><td>...</td>
-            match2 = re.search(r'欧文商標名</th>\s*<td[^>]*>(.*?)</td>', resp.text, re.DOTALL)
-            if match2:
-                return match2.group(1).strip()
-    except Exception:
-        pass
-    return ""
-
+    return None, ""
 
 # --- Translator Function ---
 def ms_translator(text, from_lang="ja"):
