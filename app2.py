@@ -42,15 +42,21 @@ def get_kegg_trade_name_and_japic(jp_name):
                 drug_resp = requests.get(drug_url, timeout=10)
                 
                 if drug_resp.ok:
+                    # --- 在這裡加入打印語句 ---
+                    print(f"DEBUG: 藥品名稱 '{jp_name}' (JAPIC:{japic_code}) 的 KEGG 詳細頁面內容：")
+                    print("-" * 50)
+                    print(drug_resp.text) # 打印完整的 HTML 內容
+                    print("-" * 50)
+                    # -------------------------
+                    
                     # 4. Extract English Trade Name (欧文商標名) from the specific drug page
-                    # 使用最寬鬆的非貪婪匹配模式 (欧文商標名.*?:\s*(.*?)(?=<))
-                    # 允許跳過 '</span>', 空格和其他標籤，直到找到內容。
                     trade_match = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
                     trade_name = trade_match.group(1).strip() if trade_match else ""
                     
                     return japic_code, trade_name.strip()
-    except Exception:
-        # Catch any request or parsing errors
+    except Exception as e:
+        # 為了調試，您可以選擇打印錯誤
+        # print(f"DEBUG Error for {jp_name}: {e}")
         pass
         
     return None, ""
