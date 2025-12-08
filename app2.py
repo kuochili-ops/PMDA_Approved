@@ -17,11 +17,13 @@ headers = {
 }
 
 # ====== KEGG japic_code 查詢 ======
+
 def get_kegg_japic_code(jp_name):
     url = f"https://rest.kegg.jp/find/drug/{jp_name}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.ok and resp.text:
+            # 取第一筆 JAPIC code
             match = re.search(r'JAPIC:(\d+)', resp.text)
             if match:
                 return match.group(1)
@@ -29,18 +31,19 @@ def get_kegg_japic_code(jp_name):
         pass
     return None
 
-# ====== KEGG 詳細頁抓官方英文商標名 ======
 def get_kegg_official_trade_name(japic_code):
     url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.ok:
-            match = re.search(r"欧文商標名</th>\s*<td[^>]*>([^<]+)</td>", resp.text)
+            # 更強健的正則，允許空格、換行
+            match = re.search(r"欧文商標名</th>\s*<td[^>]*>([\s\S]*?)</td>", resp.text)
             if match:
                 return match.group(1).strip()
     except Exception:
         pass
     return ""
+
 
 # ====== Microsoft Translator API ======
 def ms_translator(text, from_lang="ja"):
