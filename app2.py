@@ -16,65 +16,21 @@ headers = {
     "Content-type": "application/json"
 }
 
-def get_kegg_trade_name_from_search(jp_name):
+def get_kegg_trade_name_and_japic(jp_name):
     url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
     try:
         resp = requests.get(url, timeout=10)
         if resp.ok:
-            match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
-            if match:
-                return match.group(1).strip()
+            # 解析 japic code
+            japic_match = re.search(r'japic_code=(\d+)', resp.text)
+            japic_code = japic_match.group(1) if japic_match else None
+            # 解析欧文商標名
+            trade_match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
+            trade_name = trade_match.group(1).strip() if trade_match else ""
+            return japic_code, trade_name
     except Exception:
         pass
-    return ""
-
-def get_kegg_official_trade_name_product(japic_code):
-    url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={japic_code}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok:
-            match = re.search(r'欧文商標名</span>\s*:\s*([^\s<]+(?:\s[^\s<]+)*)', resp.text)
-            if match:
-                return match.group(1).strip()
-    except Exception:
-        pass
-    return ""
-
-def get_kegg_official_trade_name(japic_code):
-    url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok:
-            match = re.search(r'欧文商標名</th>\s*<td[^>]*>(.*?)</td>', resp.text, re.DOTALL)
-            if match:
-                return match.group(1).strip()
-    except Exception:
-        pass
-    return ""
-
-def get_japic_code_by_kegg(jp_name):
-    url = f"https://rest.kegg.jp/find/drug/{jp_name}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok and resp.text:
-            match = re.search(r'JAPIC:(\d+)', resp.text)
-            if match:
-                return match.group(1)
-    except Exception:
-        pass
-    jp_name_simple = re.sub(r'(錠|カプセル|筋注|点滴|注射液|シリンジ|静注|用|同|mg|ｍｇ|ML|ｍＬ|\d+|[（）()、，])', '', jp_name)
-    jp_name_simple = jp_name_simple.strip()
-    if jp_name_simple and jp_name_simple != jp_name:
-        url = f"https://rest.kegg.jp/find/drug/{jp_name_simple}"
-        try:
-            resp = requests.get(url, timeout=10)
-            if resp.ok and resp.text:
-                match = re.search(r'JAPIC:(\d+)', resp.text)
-                if match:
-                    return match.group(1)
-        except Exception:
-            pass
-    return None
+    return None, ""
 
 def ms_translator(text, from_lang="ja"):
     body = [{"text": text}]
@@ -189,22 +145,10 @@ def translate_and_combine(df):
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
         jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
-        trade_name_en = get_kegg_trade_name_from_search(jp_trade_name_raw)
-        trade_name_source = ""
-        japic_code = None
+        japic_code, trade_name_en = get_kegg_trade_name_and_japic(jp_trade_name_raw)
         if trade_name_en:
             trade_name_source = "KEGG搜尋頁"
         else:
-            japic_code = get_japic_code_by_kegg(jp_trade_name_raw)
-            if japic_code:
-                trade_name_en = get_kegg_official_trade_name_product(japic_code)
-                if trade_name_en:
-                    trade_name_source = "KEGG商品頁"
-                else:
-                    trade_name_en = get_kegg_official_trade_name(japic_code)
-                    if trade_name_en:
-                        trade_name_source = "KEGG詳細頁"
-        if not trade_name_en:
             trade_name_en = ms_translator(jp_trade_name_raw)
             trade_name_source = "自動翻譯"
         ingredient_en = ms_translator(str(row.get('成分名 (日文)', '')))
