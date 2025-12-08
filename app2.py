@@ -64,7 +64,6 @@ def find_header_row(df):
 # ====== 資料清理函式（極致容錯） ======
 def is_number(val):
     try:
-        # 支援半形、全形數字、float
         val_str = str(val).strip()
         val_str = val_str.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
         float(val_str)
@@ -146,27 +145,40 @@ def save_sheets_to_csv_auto_header(uploaded_file):
         sheet_map[month] = (csv_name, raw_count, clean_count)
     return sheet_map
 
-# ====== 翻譯主流程 ======
+# ====== 翻譯主流程（優先 KEGG，標註來源） ======
 def translate_and_combine(df):
     st.write(f"清理後有效資料共 {len(df)} 筆")
     trade_name_en_list = []
     ingredient_en_list = []
+    trade_name_source_list = []
+    ingredient_source_list = []
     progress = st.empty()
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
         kegg_result = kegg_drug_english_names(str(row.get('販賣名/公司 (日文)', '')))
         trade_name_en = kegg_result["trade_name_en_kegg"]
         ingredient_en = kegg_result["ingredient_en_kegg"]
-        if not trade_name_en:
+        # 標註來源
+        if trade_name_en:
+            trade_name_source = "KEGG"
+        else:
             trade_name_en = ms_translator(str(row.get('販賣名/公司 (日文)', '')))
-        if not ingredient_en:
+            trade_name_source = "自動翻譯"
+        if ingredient_en:
+            ingredient_source = "KEGG"
+        else:
             ingredient_en = ms_translator(str(row.get('成分名 (日文)', '')))
+            ingredient_source = "自動翻譯"
         trade_name_en_list.append(trade_name_en)
         ingredient_en_list.append(ingredient_en)
+        trade_name_source_list.append(trade_name_source)
+        ingredient_source_list.append(ingredient_source)
         time.sleep(0.34)  # KEGG 頻率限制
     progress.success("全部翻譯完成！")
     df['Trade Name/Company (English)'] = trade_name_en_list
+    df['Trade Name/Company (來源)'] = trade_name_source_list
     df['Ingredient Name (English)'] = ingredient_en_list
+    df['Ingredient Name (來源)'] = ingredient_source_list
     return df
 
 # ====== Streamlit 主程式 ======
