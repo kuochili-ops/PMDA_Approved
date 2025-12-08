@@ -6,9 +6,17 @@ import time
 import os
 
 # --- Azure Translator Setup ---
-# Assumes AZURE_KEY and AZURE_REGION are defined in Streamlit secrets.toml
-AZURE_KEY = st.secrets["AZURE_KEY"]
-AZURE_REGION = st.secrets["AZURE_REGION"]
+# 假設 AZURE_KEY 和 AZURE_REGION 定義在 Streamlit secrets.toml 中
+try:
+    AZURE_KEY = st.secrets["AZURE_KEY"]
+    AZURE_REGION = st.secrets["AZURE_REGION"]
+except KeyError:
+    # 僅為本地測試，生產環境請使用 secrets
+    AZURE_KEY = os.environ.get("AZURE_KEY", "YOUR_AZURE_KEY_HERE")
+    AZURE_REGION = os.environ.get("AZURE_REGION", "YOUR_AZURE_REGION_HERE")
+    if "YOUR" in AZURE_KEY:
+        st.warning("警告：Azure 翻譯金鑰未配置。翻譯功能將無法正常工作。請在 secrets.toml 或環境變數中設定 AZURE_KEY 和 AZURE_REGION。")
+
 endpoint = "https://api.cognitive.microsofttranslator.com/translate"
 headers = {
     "Ocp-Apim-Subscription-Key": AZURE_KEY,
@@ -16,13 +24,11 @@ headers = {
     "Content-type": "application/json"
 }
 
-# --- KEGG Function (已修正為執行兩次請求) ---
+# --- KEGG Function (包含調試打印和兩次請求修正) ---
 def get_kegg_trade_name_and_japic(jp_name):
     """
-    Attempts to find the KEGG English Trade Name (欧文商標名) and JAPIC code 
-    for a given Japanese drug name by:
-    1. Searching KEGG to get the japic_code.
-    2. Making a second request to the specific drug page to extract the trade name.
+    嘗試從 KEGG 獲取英文商標名 (欧文商標名) 和 JAPIC 代碼。
+    修正後邏輯：1. 搜尋頁面獲取 japic_code；2. 詳細頁面獲取歐文商標名。
     """
     # 1. Search KEGG for the drug name
     search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
@@ -32,31 +38,41 @@ def get_kegg_trade_name_and_japic(jp_name):
     try:
         search_resp = requests.get(search_url, timeout=10)
         if search_resp.ok:
+            
+            # --- DEBUG: 檢查搜尋頁面內容 (請在終端機查看此輸出) ---
+            print(f"\n{'='*50}\nDEBUG: 藥品名稱 '{jp_name}' 的 KEGG 搜尋頁面內容：")
+            # 打印搜尋頁面的 HTML，截斷以避免過多輸出
+            print(search_resp.text[:2000] + "\n...") 
+            print("=" * 50)
+            # --------------------------------------------------------
+            
             # 2. Extract JAPIC Code from the search result page
             japic_match = re.search(r'japic_code=(\d+)', search_resp.text)
+            
             if japic_match:
                 japic_code = japic_match.group(1)
+                
+                print(f"DEBUG: 成功提取 JAPIC Code: {japic_code}") 
                 
                 # 3. Send a SECOND REQUEST to the specific drug page
                 drug_url = f"https://www.kegg.jp/medicus-bin/japicmed?japiccode={japic_code}"
                 drug_resp = requests.get(drug_url, timeout=10)
                 
                 if drug_resp.ok:
-                    # --- 在這裡加入打印語句 ---
-                    print(f"DEBUG: 藥品名稱 '{jp_name}' (JAPIC:{japic_code}) 的 KEGG 詳細頁面內容：")
-                    print("-" * 50)
-                    print(drug_resp.text) # 打印完整的 HTML 內容
-                    print("-" * 50)
-                    # -------------------------
-                    
                     # 4. Extract English Trade Name (欧文商標名) from the specific drug page
+                    # 使用最寬鬆的非貪婪匹配模式
                     trade_match = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
                     trade_name = trade_match.group(1).strip() if trade_match else ""
                     
+                    if trade_name:
+                         print(f"DEBUG: 成功獲取歐文商標名: {trade_name.strip()}")
+                    
                     return japic_code, trade_name.strip()
+            else:
+                print(f"DEBUG: 錯誤！找不到藥品 '{jp_name}' 的 JAPIC Code。")
+                
     except Exception as e:
-        # 為了調試，您可以選擇打印錯誤
-        # print(f"DEBUG Error for {jp_name}: {e}")
+        print(f"DEBUG Error for {jp_name}: {e}")
         pass
         
     return None, ""
@@ -64,8 +80,11 @@ def get_kegg_trade_name_and_japic(jp_name):
 # --- Translator Function ---
 def ms_translator(text, from_lang="ja"):
     """
-    Uses Azure Translator to translate Japanese text to English.
+    使用 Azure Translator 將日文文本翻譯成英文。
     """
+    if "YOUR_AZURE_KEY_HERE" in AZURE_KEY:
+        return f"Translation Failed (Key Not Set): {text}"
+        
     body = [{"text": text}]
     params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
     try:
@@ -73,15 +92,16 @@ def ms_translator(text, from_lang="ja"):
         if resp.ok:
             data = resp.json()
             return data[0]["translations"][0]["text"]
+        else:
+            print(f"Azure Translator Error: {resp.status_code}, {resp.text}")
+            return f"Translation API Error: {text}"
     except Exception:
-        pass
-    return ""
+        return f"Translation Request Failed: {text}"
 
 # --- Data Cleaning and Header Detection Functions ---
 def find_header_row(df):
     """
-    Attempts to find the header row in the PMDA Excel sheet based on key Japanese terms 
-    ('名', '成', '販').
+    嘗試在 PMDA Excel 表格中找到標題列。
     """
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
@@ -99,7 +119,7 @@ def find_header_row(df):
 
 def is_number(val):
     """
-    Checks if a value can be converted to a number, handling Japanese full-width digits.
+    檢查值是否為數字，並處理全角數字。
     """
     try:
         val_str = str(val).strip()
@@ -112,7 +132,7 @@ def is_number(val):
 
 def clean_dataframe(df):
     """
-    Renames columns, filters out invalid rows, and cleans the DataFrame.
+    清理並正規化 DataFrame。
     """
     if not isinstance(df, pd.DataFrame):
         return pd.DataFrame()
@@ -155,11 +175,10 @@ def clean_dataframe(df):
 # --- Main Processing Functions ---
 def save_sheets_to_csv_auto_header(uploaded_file):
     """
-    Processes all sheets in the uploaded Excel file, detects headers automatically, 
-    cleans the data, and saves valid sheets as temporary CSV files.
+    處理上傳的 Excel 文件中的所有分頁，自動偵測標題，清理數據並保存為臨時 CSV 文件。
     """
     xls = pd.ExcelFile(uploaded_file)
-    sheet_map = {} # Maps month name to (temp_csv_name, total_rows, processed_rows)
+    sheet_map = {} 
     
     for sheet_name in xls.sheet_names:
         # 1. Read raw data without header to detect the actual header row
@@ -194,14 +213,13 @@ def save_sheets_to_csv_auto_header(uploaded_file):
         # 5. Save as a temporary CSV
         csv_name = f"{month}.csv"
         df.to_csv(csv_name, index=False, encoding="utf-8")
-        sheet_map[month] = (csv_name, len(raw_df), len(df)) # Store (filename, raw_len, cleaned_len)
+        sheet_map[month] = (csv_name, len(raw_df), len(df)) 
         
     return sheet_map
 
 def translate_and_combine(df):
     """
-    Iterates through the DataFrame, attempts KEGG lookup first, then falls back 
-    to Microsoft Translator for English translation.
+    迭代 DataFrame，優先嘗試 KEGG 查找，失敗後退回微軟翻譯。
     """
     trade_name_en_list = []
     trade_name_source_list = []
@@ -221,10 +239,10 @@ def translate_and_combine(df):
         # --- Trade Name Translation (KEGG Priority) ---
         jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
         
-        # 1. Try KEGG first (now involves two web requests)
+        # 1. Try KEGG first 
         japic_code, trade_name_en = get_kegg_trade_name_and_japic(jp_trade_name_raw)
         
-        if trade_name_en:
+        if trade_name_en and "Translation Failed" not in trade_name_en:
             trade_name_source = "KEGG搜尋頁"
         else:
             # 2. Fallback to Azure Translator
@@ -241,7 +259,7 @@ def translate_and_combine(df):
         ingredient_en_list.append(ingredient_en)
         ingredient_source_list.append(ingredient_source)
         
-        # Time delay to prevent hitting rate limits (now handles two requests per row)
+        # Time delay to prevent hitting rate limits (現在處理兩個請求，延遲很重要)
         time.sleep(0.34) 
         
     progress_bar.empty()
