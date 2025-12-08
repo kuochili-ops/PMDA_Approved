@@ -44,18 +44,18 @@ def get_japic_code_by_kegg(jp_name):
     return None
 
 # ====== KEGG 詳細頁抓官方英文商標名 ======
-def get_kegg_official_trade_name(japic_code):
-    url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
-    try:
-        resp = requests.get(url, timeout=10)
-        if resp.ok:
-            # 解析 <th>欧文商標名</th> 對應的 <td>
-            match = re.search(r'欧文商標名</th>\s*<td[^>]*>(.*?)</td>', resp.text, re.DOTALL)
-            if match:
-                return match.group(1).strip()
-    except Exception:
-        pass
-    return ""
+
+def get_kegg_trade_name(japic_code):
+    # 先查 product 頁面
+    trade_name = get_kegg_official_trade_name_product(japic_code)
+    if trade_name:
+        return trade_name, "KEGG"
+    # 再查詳細頁
+    trade_name = get_kegg_official_trade_name(japic_code)
+    if trade_name:
+        return trade_name, "KEGG"
+    return "", ""
+
 
 # ====== Microsoft Translator API ======
 def ms_translator(text, from_lang="ja"):
