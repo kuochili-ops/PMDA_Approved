@@ -16,7 +16,6 @@ headers = {
     "Content-type": "application/json"
 }
 
-# ====== KEGG 搜尋頁抓歐文商標名 ======
 def get_kegg_trade_name_from_search(jp_name):
     url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
     try:
@@ -29,7 +28,6 @@ def get_kegg_trade_name_from_search(jp_name):
         pass
     return ""
 
-# ====== 商品詳細頁抓歐文商標名 ======
 def get_kegg_official_trade_name_product(japic_code):
     url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={japic_code}"
     try:
@@ -42,7 +40,6 @@ def get_kegg_official_trade_name_product(japic_code):
         pass
     return ""
 
-# ====== 詳細頁抓歐文商標名 ======
 def get_kegg_official_trade_name(japic_code):
     url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
     try:
@@ -55,7 +52,6 @@ def get_kegg_official_trade_name(japic_code):
         pass
     return ""
 
-# ====== 商品名多策略查詢 JAPIC code ======
 def get_japic_code_by_kegg(jp_name):
     url = f"https://rest.kegg.jp/find/drug/{jp_name}"
     try:
@@ -66,7 +62,6 @@ def get_japic_code_by_kegg(jp_name):
                 return match.group(1)
     except Exception:
         pass
-    # 嘗試去除常見劑型、數字再查
     jp_name_simple = re.sub(r'(錠|カプセル|筋注|点滴|注射液|シリンジ|静注|用|同|mg|ｍｇ|ML|ｍＬ|\d+|[（）()、，])', '', jp_name)
     jp_name_simple = jp_name_simple.strip()
     if jp_name_simple and jp_name_simple != jp_name:
@@ -81,7 +76,6 @@ def get_japic_code_by_kegg(jp_name):
             pass
     return None
 
-# ====== Microsoft Translator API ======
 def ms_translator(text, from_lang="ja"):
     body = [{"text": text}]
     params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
@@ -94,7 +88,6 @@ def ms_translator(text, from_lang="ja"):
         pass
     return ""
 
-# ====== 強化自動尋找欄位名稱行 ======
 def find_header_row(df):
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
@@ -106,7 +99,6 @@ def find_header_row(df):
             return i
     return None
 
-# ====== 資料清理函式 ======
 def is_number(val):
     try:
         val_str = str(val).strip()
@@ -150,7 +142,6 @@ def clean_dataframe(df):
         df = df.reset_index(drop=True)
     return df
 
-# ====== 分頁另存 CSV（自動尋找欄位名稱行） ======
 def save_sheets_to_csv_auto_header(uploaded_file):
     xls = pd.ExcelFile(uploaded_file)
     sheet_map = {}
@@ -188,7 +179,6 @@ def save_sheets_to_csv_auto_header(uploaded_file):
         sheet_map[month] = (csv_name, raw_count, clean_count)
     return sheet_map
 
-# ====== 翻譯主流程（優先 KEGG 各頁歐文商標名） ======
 def translate_and_combine(df):
     st.write(f"清理後有效資料共 {len(df)} 筆")
     trade_name_en_list = []
@@ -199,37 +189,31 @@ def translate_and_combine(df):
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
         jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
-        # 1. 先查搜尋頁
         trade_name_en = get_kegg_trade_name_from_search(jp_trade_name_raw)
         trade_name_source = ""
         japic_code = None
         if trade_name_en:
             trade_name_source = "KEGG搜尋頁"
         else:
-            # 2. 查 JAPIC code
             japic_code = get_japic_code_by_kegg(jp_trade_name_raw)
-            # 3. 查商品詳細頁
             if japic_code:
                 trade_name_en = get_kegg_official_trade_name_product(japic_code)
                 if trade_name_en:
                     trade_name_source = "KEGG商品頁"
                 else:
-                    # 4. 查詳細頁
                     trade_name_en = get_kegg_official_trade_name(japic_code)
                     if trade_name_en:
                         trade_name_source = "KEGG詳細頁"
-        # 5. 都查不到才用翻譯
         if not trade_name_en:
             trade_name_en = ms_translator(jp_trade_name_raw)
             trade_name_source = "自動翻譯"
-        # 成分名用翻譯（如需查 KEGG 可再擴充）
         ingredient_en = ms_translator(str(row.get('成分名 (日文)', '')))
         ingredient_source = "自動翻譯"
         trade_name_en_list.append(trade_name_en)
         trade_name_source_list.append(trade_name_source)
         ingredient_en_list.append(ingredient_en)
         ingredient_source_list.append(ingredient_source)
-        time.sleep(0.34)  # KEGG 頻率限制
+        time.sleep(0.34)
     progress.success("全部翻譯完成！")
     df['Trade Name/Company (English)'] = trade_name_en_list
     df['Trade Name/Company (來源)'] = trade_name_source_list
@@ -237,18 +221,6 @@ def translate_and_combine(df):
     df['Ingredient Name (來源)'] = ingredient_source_list
     return df
 
-# ====== 高亮 KEGG 結果（綠色字體） ======
-def highlight_kegg_col(col):
-    # col 是英文商標名欄位的 Series
-    # 需根據來源欄位判斷
-    # 這裡假設 DataFrame 有 'Trade Name/Company (來源)' 欄位
-    # 需在 apply 時傳入來源欄位
-    return [
-        'color: green; font-weight: bold' if source.startswith("KEGG") else ''
-        for source in col.index.map(lambda idx: col._parent.loc[idx, 'Trade Name/Company (來源)'])
-    ]
-
-# ====== Streamlit 主程式 ======
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
     st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
@@ -267,12 +239,7 @@ def main():
                 st.warning(f"{month} 無有效資料，已跳過。")
                 continue
             translated_df = translate_and_combine(df)
-            # 高亮 KEGG 結果
-            styled_df = translated_df.style.apply(
-                highlight_kegg_col,
-                subset=['Trade Name/Company (English)']
-            )
-            st.dataframe(styled_df, use_container_width=True, hide_index=True)
+            st.dataframe(translated_df, use_container_width=True, hide_index=True)
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label=f"📥 下載 {month} 翻譯結果 (CSV)",
