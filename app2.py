@@ -159,7 +159,7 @@ def translate_and_combine(df):
     progress = st.empty()
     for idx, row in df.iterrows():
         progress.info(f"第 {idx+1} 項翻譯中…")
-        jp_trade_name = str(row.get('販賣名/公司 (日文)', '')).split()[0].replace('錠', '').replace('カプセル', '').replace('点滴', '').replace('筋注', '').replace('注射液', '').replace('シリンジ', '').replace('静注', '').replace('mg', '').replace('ｍｇ', '').replace('ML', '').replace('ｍＬ', '').replace('用', '').replace('同', '').replace(' ', '').replace('\u3000', '').replace('\n', '')
+        jp_trade_name = str(row.get('販賣名/公司 (日文)', '')).split()[0]
         # 1. 先查 KEGG 官方英文商標名
         japic_code = get_kegg_japic_code(jp_trade_name)
         trade_name_en = ""
@@ -217,4 +217,3 @@ def main():
             os.remove(csv_name)
 
 if __name__ == "__main__":
-    main()
