@@ -16,11 +16,13 @@ headers = {
     "Content-type": "application/json"
 }
 
-# --- KEGG Function ---
+# --- KEGG Function (已修正為執行兩次請求) ---
 def get_kegg_trade_name_and_japic(jp_name):
     """
     Attempts to find the KEGG English Trade Name (欧文商標名) and JAPIC code 
-    for a given Japanese drug name by scraping the KEGG search page, then the drug page.
+    for a given Japanese drug name by:
+    1. Searching KEGG to get the japic_code.
+    2. Making a second request to the specific drug page to extract the trade name.
     """
     # 1. Search KEGG for the drug name
     search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
@@ -41,8 +43,9 @@ def get_kegg_trade_name_and_japic(jp_name):
                 
                 if drug_resp.ok:
                     # 4. Extract English Trade Name (欧文商標名) from the specific drug page
-                    # 使用更穩健的正規表達式 (.*?)(?=<) 來捕獲內容
-                    trade_match = re.search(r'欧文商標名</span>\s*:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
+                    # 使用最寬鬆的非貪婪匹配模式 (欧文商標名.*?:\s*(.*?)(?=<))
+                    # 允許跳過 '</span>', 空格和其他標籤，直到找到內容。
+                    trade_match = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
                     trade_name = trade_match.group(1).strip() if trade_match else ""
                     
                     return japic_code, trade_name.strip()
@@ -78,11 +81,11 @@ def find_header_row(df):
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
         row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
         
-        # Heuristic 1: Look for two '名', one '成' (Ingredient), and one '販' (Sale/Trade)
+        # Heuristic 1
         if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
             return i
         
-        # Heuristic 2: Look for explicit column names
+        # Heuristic 2
         if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
            and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
             return i
@@ -133,7 +136,6 @@ def clean_dataframe(df):
     elif '成分名 (日文)' in df.columns:
         df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
     else:
-        # If necessary columns are not found, return empty DataFrame
         df = pd.DataFrame()
         
     if not df.empty:
@@ -200,7 +202,7 @@ def translate_and_combine(df):
     ingredient_en_list = []
     ingredient_source_list = []
     
-    # Progress bar and status (optional, for Streamlit UI)
+    # Progress bar and status
     status_text = st.empty()
     progress_bar = st.progress(0)
     total_rows = len(df)
@@ -213,7 +215,7 @@ def translate_and_combine(df):
         # --- Trade Name Translation (KEGG Priority) ---
         jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
         
-        # 1. Try KEGG first
+        # 1. Try KEGG first (now involves two web requests)
         japic_code, trade_name_en = get_kegg_trade_name_and_japic(jp_trade_name_raw)
         
         if trade_name_en:
@@ -233,7 +235,7 @@ def translate_and_combine(df):
         ingredient_en_list.append(ingredient_en)
         ingredient_source_list.append(ingredient_source)
         
-        # Time delay to prevent hitting rate limits on KEGG/Azure (approx 3/second)
+        # Time delay to prevent hitting rate limits (now handles two requests per row)
         time.sleep(0.34) 
         
     progress_bar.empty()
@@ -244,9 +246,6 @@ def translate_and_combine(df):
     df['Trade Name/Company (來源)'] = trade_name_source_list
     df['Ingredient Name (English)'] = ingredient_en_list
     df['Ingredient Name (來源)'] = ingredient_source_list
-    
-    # Optional: Add JAPIC code if it was successfully fetched (requires code modification 
-    # to store the japic_code from get_kegg_trade_name_and_japic)
     
     return df
 
