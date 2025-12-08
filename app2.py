@@ -237,6 +237,12 @@ def translate_and_combine(df):
     df['Ingredient Name (來源)'] = ingredient_source_list
     return df
 
+# ====== 高亮 KEGG 結果（綠色字體） ======
+def highlight_kegg(val, source):
+    if source.startswith("KEGG"):
+        return 'color: green; font-weight: bold'
+    return ''
+
 # ====== Streamlit 主程式 ======
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
@@ -256,7 +262,12 @@ def main():
                 st.warning(f"{month} 無有效資料，已跳過。")
                 continue
             translated_df = translate_and_combine(df)
-            st.dataframe(translated_df, use_container_width=True, hide_index=True)
+            # 高亮 KEGG 結果
+            styled_df = translated_df.style.apply(
+                lambda x: [highlight_kegg(v, s) for v, s in zip(x['Trade Name/Company (English)'], x['Trade Name/Company (來源)'])],
+                axis=1, subset=['Trade Name/Company (English)']
+            )
+            st.dataframe(styled_df, use_container_width=True, hide_index=True)
             csv_export = translated_df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label=f"📥 下載 {month} 翻譯結果 (CSV)",
