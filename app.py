@@ -5,7 +5,10 @@ import re
 import time
 import os
 
-# --- 環境變數與配置 ---
+# --- 設定頁面（必須放在最前面） ---
+st.set_page_config(layout="wide", page_title="PMDA 翻譯器")
+
+# --- Azure API 配置 ---
 try:
     AZURE_KEY = st.secrets["AZURE_KEY"]
     AZURE_REGION = st.secrets["AZURE_REGION"]
@@ -13,55 +16,57 @@ except:
     AZURE_KEY = os.environ.get("AZURE_KEY", "YOUR_KEY")
     AZURE_REGION = os.environ.get("AZURE_REGION", "YOUR_REGION")
 
-# --- 1. KEGG 關鍵字極限清理 ---
+# --- 1. KEGG 專用清洗函數 ---
 def clean_for_kegg(text):
+    """將複雜的藥名縮減為 KEGG 能識別的核心詞"""
     if not text or pd.isna(text): return ""
-    # 移除括號及其後的所有內容 (移除公司名、規格)
+    # 移除括號內容 (包含公司名與編號)
     name = re.split(r'\(|（|［|\[', str(text))[0]
-    # 移除藥物常見後綴與劑型
-    noise = ['錠', 'カプセル', '注', 'シリンジ', '配合', '散', '顆粒', '軟膏', '液', '點眼', '28', '21', '5mg', '10mg', '20mg']
+    # 移除劑型與單位干擾
+    noise = ['錠', 'カプセル', '注', 'シリンジ', '配合', '散', '顆粒', '軟膏', '液', '點眼', '28', '21', '5mg', '10mg']
     for n in noise:
         name = name.replace(n, '')
     return name.strip()
 
-# --- 2. KEGG REST API 查詢 ---
+# --- 2. 核心 KEGG REST API ---
 def get_kegg_rest_translation(jp_name, log_container, is_ingredient=False):
+    """依照 KEGG API 手冊，先 find 再 get"""
     search_term = clean_for_kegg(jp_name)
     if not search_term: return None
 
     try:
-        # Step 1: Find ID
+        # Step 1: 透過 find 取得 ID
         find_url = f"https://rest.kegg.jp/find/drug/{search_term}"
         log_container.write(f"🧬 KEGG 檢索: `{search_term}`")
         
         find_resp = requests.get(find_url, timeout=5)
         if find_resp.ok and find_resp.text.strip():
-            # 取得第一筆匹配結果
-            first_line = find_resp.text.split('\n')[0]
-            drug_id = first_line.split('\t')[0].replace('dr:', '')
+            # 取得第一筆匹配結果的 ID (格式如 dr:D00604)
+            drug_id = find_resp.text.split('\n')[0].split('\t')[0].replace('dr:', '')
             
-            # Step 2: Get Details
+            # Step 2: 透過 get 取得詳細資料
             get_url = f"https://rest.kegg.jp/get/{drug_id}"
             get_resp = requests.get(get_url, timeout=5)
             
             if get_resp.ok:
                 content = get_resp.text
-                th_match = re.search(r'TH_NAME\s+(.*?)\n', content) # 商標名
-                en_match = re.search(r'EN_NAME\s+(.*?)\n', content) # 一般名
+                # TH_NAME = 歐文商標名, EN_NAME = 英文一般名
+                th_match = re.search(r'TH_NAME\s+(.*?)\n', content)
+                en_match = re.search(r'EN_NAME\s+(.*?)\n', content)
                 
                 th_val = th_match.group(1).strip() if th_match else None
                 en_val = en_match.group(1).strip() if en_match else None
                 
-                # 判斷邏輯：成分名優先給 EN_NAME，商品名優先給 TH_NAME
+                # 商品名優先取 TH，成分名優先取 EN
                 res = (en_val if en_val else th_val) if is_ingredient else (th_val if th_val else en_val)
                 if res:
-                    log_container.write(f"✅ KEGG 命中: `{res}`")
+                    log_container.write(f"✅ KEGG 成功: `{res}`")
                     return res
     except:
         pass
     return None
 
-# --- 3. Azure Fallback ---
+# --- 3. Azure 備援翻譯 ---
 def azure_fallback(text):
     if not text or pd.isna(text) or "YOUR" in AZURE_KEY: return text
     headers = {
@@ -78,74 +83,55 @@ def azure_fallback(text):
     except:
         return text
 
-# --- 4. 資料清理邏輯 ---
-def process_dataframe(df):
-    header_idx = None
-    for i, row in df.iterrows():
-        row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
-        if '成分名' in row_str and '販' in row_str:
-            header_idx = i
-            break
-    if header_idx is None: return None
-    
-    df.columns = df.iloc[header_idx]
-    df = df.iloc[header_idx + 1:].reset_index(drop=True)
-    
-    # 欄位對齊
-    rename_map = {}
-    for col in df.columns:
-        c = str(col).replace('\n', '')
-        if '販' in c and '名' in c: rename_map[col] = 'JP_Trade'
-        elif '成' in c and '名' in c: rename_map[col] = 'JP_Ingredient'
-    
-    return df.rename(columns=rename_map).dropna(subset=['JP_Trade', 'JP_Ingredient'])
+# --- 4. 主執行介面 ---
+st.title("🇯🇵 PMDA 日本新藥清單翻譯 (穩定版)")
 
-# --- 5. 主程式 ---
-st.set_page_config(layout="wide", page_title="PMDA 翻譯器")
-st.title("💊 PMDA 日本新藥清單翻譯 (REST API 優先版)")
-
-uploaded_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx'])
+uploaded_file = st.file_uploader("上傳 Excel", type=['xlsx'])
 
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
     for sheet_name in xls.sheet_names:
-        raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        df = process_dataframe(raw_df)
+        df = pd.read_excel(xls, sheet_name=sheet_name)
         
-        if df is None or df.empty: continue
+        # 簡單判斷標題 (根據您的截圖邏輯)
+        if not any('成分名' in str(c) for c in df.columns) and not any('販' in str(c) for c in df.columns):
+            continue
+
+        st.subheader(f"月份：{sheet_name}")
         
-        st.subheader(f"📄 分頁：{sheet_name}")
+        # 使用 placeholder 避免刷新干擾渲染
+        status_placeholder = st.empty()
+        table_placeholder = st.empty()
         
-        # 使用 status 容器包裝，確保處理中畫面不消失
-        with st.status(f"正在翻譯 {sheet_name}...", expanded=True) as status:
-            log_area = st.empty()
-            results = []
+        results = []
+        with status_placeholder.status(f"處理中: {sheet_name}...", expanded=True) as status:
+            log_box = st.empty()
             
+            # 為加速測試僅示範前幾筆，您可以移除 [0:10]
             for idx, row in df.iterrows():
-                # 處理商品名
-                en_t = get_kegg_rest_translation(row['JP_Trade'], log_area, False)
-                t_src = "KEGG" if en_t else "Azure"
-                if not en_t: en_t = azure_fallback(row['JP_Trade'])
+                # 這裡假設欄位名稱包含 '成分名' 或 '販賣名'
+                # 請依實際 CSV/Excel 欄位名稱調整，此處簡化處理
+                jp_trade = str(row.iloc[1]) # 假設第二欄是商品名
+                jp_ing = str(row.iloc[4])   # 假設第五欄是成分名
                 
-                # 處理成分名
-                en_i = get_kegg_rest_translation(row['JP_Ingredient'], log_area, True)
+                # 商品名翻譯
+                en_t = get_kegg_rest_translation(jp_trade, log_box, False)
+                t_src = "KEGG" if en_t else "Azure"
+                if not en_t: en_t = azure_fallback(jp_trade)
+                
+                # 成分名翻譯
+                en_i = get_kegg_rest_translation(jp_ing, log_box, True)
                 i_src = "KEGG" if en_i else "Azure"
-                if not en_i: en_i = azure_fallback(row['JP_Ingredient'])
+                if not en_i: en_i = azure_fallback(jp_ing)
                 
                 results.append({
-                    "商品名 (日)": row['JP_Trade'],
+                    "商品名(日)": jp_trade,
                     "Trade Name (EN)": en_t,
-                    "商品來源": t_src,
-                    "成分名 (日)": row['JP_Ingredient'],
+                    "成分名(日)": jp_ing,
                     "Ingredient (EN)": en_i,
-                    "成分來源": i_src
+                    "來源": f"{t_src}/{i_src}"
                 })
-                time.sleep(0.05)
-            
-            status.update(label=f"✅ {sheet_name} 完成", state="complete", expanded=False)
+            status.update(label="✅ 完成", state="complete")
         
-        # 顯示與下載
         res_df = pd.DataFrame(results)
-        st.dataframe(res_df, use_container_width=True)
-        csv = res_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
-        st.download_button(f"📥 下載 {sheet_name}", csv, f"{sheet_name}.csv", "text/csv")
+        table_placeholder.dataframe(res_df, use_container_width=True)
