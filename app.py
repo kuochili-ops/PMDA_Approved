@@ -3,126 +3,129 @@ import pandas as pd
 import requests
 import re
 import time
-import os
+from concurrent.futures import ThreadPoolExecutor
 
-# --- 設定頁面 ---
-st.set_page_config(layout="wide", page_title="PMDA 翻譯器穩定版")
+# --- 設定與初始化 ---
+st.set_page_config(layout="wide", page_title="PMDA 翻譯器 (穩定效能版)")
 
-# --- 1. KEGG 關鍵字提取優化 ---
-def get_clean_kegg_term(text):
-    """將藥名精簡為 KEGG API 最容易識別的形式"""
-    if not text or pd.isna(text): return ""
-    # 移除括號及其內容 (公司名、代碼)
-    name = re.split(r'\(|（|［|\[', str(text))[0]
-    # 移除常見干擾詞
-    noise = ['錠', 'カプセル', '注', 'シリンジ', '配合', '散', '顆粒', '軟膏', '液', '28', '21']
-    for n in noise:
-        name = name.replace(n, '')
-    return name.strip()
+# 從 Secrets 讀取 Key
+AZURE_KEY = st.secrets.get("AZURE_KEY", "YOUR_KEY")
+AZURE_REGION = st.secrets.get("AZURE_REGION", "YOUR_REGION")
 
-# --- 2. 帶重試機制的 KEGG REST API ---
-def kegg_api_lookup(jp_name, log_container, is_ingredient=False):
-    term = get_clean_kegg_term(jp_name)
-    if not term: return None
+# 建立快取以避免重複查詢
+if 'translation_cache' not in st.session_state:
+    st.session_state.translation_cache = {}
 
-    # 使用 Session 保持連線，提高網路慢速時的效率
-    session = requests.Session()
+# --- 1. 快速翻譯 (Azure) ---
+def azure_translate(text):
+    if not text or pd.isna(text): return text
+    if text in st.session_state.translation_cache:
+        return st.session_state.translation_cache[text]
+    
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_KEY,
+        "Ocp-Apim-Subscription-Region": AZURE_REGION,
+        "Content-type": "application/json"
+    }
+    body = [{"text": str(text)}]
     try:
-        log_container.write(f"🧬 KEGG 檢索: `{term}`")
-        # Step 1: Find
-        find_url = f"https://rest.kegg.jp/find/drug/{term}"
-        # 增加 timeout 到 10 秒應對慢速網路
-        resp = session.get(find_url, timeout=10)
-        
-        if resp.ok and resp.text.strip():
-            # 取第一筆最相關的 ID
-            drug_id = resp.text.split('\n')[0].split('\t')[0].replace('dr:', '')
-            
-            # Step 2: Get
-            get_url = f"https://rest.kegg.jp/get/{drug_id}"
-            get_resp = session.get(get_url, timeout=10)
-            
-            if get_resp.ok:
-                content = get_resp.text
-                th_name = re.search(r'TH_NAME\s+(.*?)\n', content)
-                en_name = re.search(r'EN_NAME\s+(.*?)\n', content)
-                
-                th_val = th_name.group(1).strip() if th_name else None
-                en_val = en_name.group(1).strip() if en_name else None
-                
-                # 成分名拿 EN_NAME (一般名)，商品名拿 TH_NAME (歐文商標名)
-                res = (en_val if en_val else th_val) if is_ingredient else (th_val if th_val else en_val)
-                if res:
-                    log_container.write(f"✅ KEGG 命中: `{res}`")
-                    return res
-    except Exception as e:
-        log_container.write(f"⚠️ 網路請求延遲: {str(e)[:50]}...")
+        r = requests.post("https://api.cognitive.microsofttranslator.com/translate?api-version=3.0&from=ja&to=en", 
+                          headers=headers, json=body, timeout=5)
+        res = r.json()[0]["translations"][0]["text"]
+        st.session_state.translation_cache[text] = res
+        return res
+    except:
+        return text
+
+# --- 2. 專業校正 (KEGG REST API) ---
+def kegg_refine(jp_name, is_ingredient=False):
+    # 極簡化清理以提高命中率
+    term = re.split(r'\(|（|［|\[', str(jp_name))[0]
+    term = re.sub(r'錠|カプセル|注|シリンジ|配合|28|21', '', term).strip()
+    
+    if not term or len(term) < 2: return None
+    
+    try:
+        # Step 1: Find ID
+        f_resp = requests.get(f"https://rest.kegg.jp/find/drug/{term}", timeout=5)
+        if f_resp.ok and f_resp.text.strip():
+            drug_id = f_resp.text.split('\n')[0].split('\t')[0].replace('dr:', '')
+            # Step 2: Get Details
+            g_resp = requests.get(f"https://rest.kegg.jp/get/{drug_id}", timeout=5)
+            if g_resp.ok:
+                content = g_resp.text
+                th = re.search(r'TH_NAME\s+(.*?)\n', content)
+                en = re.search(r'EN_NAME\s+(.*?)\n', content)
+                # 校正邏輯：成分名優先 EN，商品名優先 TH
+                kegg_res = (en.group(1) if en else th.group(1)) if is_ingredient else (th.group(1) if th else en.group(1))
+                return kegg_res.strip()
+    except:
+        return None
     return None
 
-# --- 3. 標題與欄位識別 ---
-def find_drug_table(df):
-    for i, row in df.iterrows():
-        row_str = ''.join([str(x) for x in row if pd.notnull(x)])
-        if '成分名' in row_str and '販' in row_str:
-            df.columns = df.iloc[i]
-            return df.iloc[i+1:].reset_index(drop=True)
-    return None
+# --- 3. 處理主邏輯 ---
+st.title("💊 PMDA 翻譯助手 (Azure 翻譯 + KEGG 校正)")
 
-# --- 主程式 ---
-st.title("🇯🇵 PMDA 日本新藥清單翻譯 (防卡住穩定版)")
-
-uploaded_file = st.file_uploader("請上傳您的 000277966 (2).xlsx", type=['xlsx'])
+uploaded_file = st.file_uploader("上傳 Excel", type=['xlsx'])
 
 if uploaded_file:
     xls = pd.ExcelFile(uploaded_file)
-    for sheet_name in xls.sheet_names:
-        df_raw = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        df = find_drug_table(df_raw)
+    for sheet in xls.sheet_names:
+        df = pd.read_excel(xls, sheet_name=sheet)
         
-        if df is None or df.empty: continue
+        # 尋找關鍵欄位 (販賣名/成分名)
+        trade_col = next((c for c in df.columns if '販' in str(c)), None)
+        ing_col = next((c for c in df.columns if '成' in str(c)), None)
         
-        st.subheader(f"📊 分頁: {sheet_name}")
-        
-        # 建立結果清單
-        final_results = []
-        
-        # 使用專用容器顯示進度
-        with st.status(f"正在翻譯 {sheet_name}...", expanded=True) as status:
-            log_area = st.empty()
-            
-            # 遍歷資料
-            for idx, row in df.iterrows():
-                # 自動搜尋欄位
-                row_dict = row.to_dict()
-                jp_trade = next((v for k, v in row_dict.items() if '販' in str(k) and '名' in str(k)), None)
-                jp_ing = next((v for k, v in row_dict.items() if '成' in str(k) and '名' in str(k)), None)
-                
-                if not jp_trade or not jp_ing: continue
+        if not trade_col or not ing_col: continue
 
-                # 商品名查詢 (KEGG 優先)
-                en_trade = kegg_api_lookup(jp_trade, log_area, is_ingredient=False)
-                t_src = "KEGG API" if en_trade else "Azure (備援)"
-                
-                # 成分名查詢 (KEGG 優先，例如：ドロスピレノン)
-                en_ing = kegg_api_lookup(jp_ing, log_area, is_ingredient=True)
-                i_src = "KEGG API" if en_ing else "Azure (備援)"
-                
-                # 如果 KEGG 失敗，此處可串接您現有的 Azure 函數
-                # ... (Azure 呼叫邏輯)
-                
-                final_results.append({
-                    "販賣名 (日)": jp_trade,
-                    "Trade Name (EN)": en_trade if en_trade else "Pending",
-                    "來源(T)": t_src,
-                    "成分名 (日)": jp_ing,
-                    "Ingredient (EN)": en_ing if en_ing else "Pending",
-                    "來源(I)": i_src
-                })
-                # 短暫停頓避免請求過於密集
-                time.sleep(0.1)
-                
-            status.update(label="✅ 處理完成", state="complete", expanded=False)
+        st.subheader(f"頁籤: {sheet}")
         
-        # 顯示結果
-        res_df = pd.DataFrame(final_results)
-        st.dataframe(res_df, use_container_width=True)
+        # 第一階段：Azure 快速翻譯生成預覽
+        with st.status("🚀 第一階段：Azure 快速翻譯中...", expanded=True) as status:
+            progress_bar = st.progress(0)
+            rows = []
+            total = len(df)
+            
+            for i, row in df.iterrows():
+                jp_t, jp_i = str(row[trade_col]), str(row[ing_col])
+                
+                # 先用 Azure
+                en_t = azure_translate(jp_t)
+                en_i = azure_translate(jp_i)
+                
+                rows.append({
+                    "販賣名(日)": jp_t,
+                    "Trade Name (EN)": en_t,
+                    "成分名(日)": jp_i,
+                    "Ingredient (EN)": en_i,
+                    "校正狀態": "等待校正..."
+                })
+                progress_bar.progress((i+1)/total)
+            
+            status.update(label="✅ 第一階段完成，開始 KEGG 校正", state="running")
+            
+            # 第二階段：KEGG 校正
+            st.write("🔍 第二階段：KEGG API 專業校正中...")
+            for idx, item in enumerate(rows):
+                # 校正商品名
+                k_t = kegg_refine(item["販賣名(日)"], is_ingredient=False)
+                if k_t:
+                    item["Trade Name (EN)"] = k_t
+                
+                # 校正成分名 (如: ドロスピレノン)
+                k_i = kegg_refine(item["成分名(日)"], is_ingredient=True)
+                if k_i:
+                    item["Ingredient (EN)"] = k_i
+                
+                item["校正狀態"] = "✅ KEGG 已校正" if (k_t or k_i) else "⚠️ Azure 翻譯"
+                
+            status.update(label="🎉 全部處理完成", state="complete", expanded=False)
+
+        # 呈現最終表格
+        final_df = pd.DataFrame(rows)
+        st.dataframe(final_df, use_container_width=True)
+        
+        # 下載按鈕
+        csv = final_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+        st.download_button(f"📥 下載 {sheet} 結果", csv, f"{sheet}_translated.csv", "text/csv")
