@@ -6,327 +6,178 @@ import time
 import os
 
 # --- Azure Translator Setup ---
-# 假設 AZURE_KEY 和 AZURE_REGION 定義在 Streamlit secrets.toml 中
 try:
     AZURE_KEY = st.secrets["AZURE_KEY"]
     AZURE_REGION = st.secrets["AZURE_REGION"]
-except KeyError:
-    # 僅為本地測試，生產環境請使用 secrets
-    AZURE_KEY = os.environ.get("AZURE_KEY", "YOUR_AZURE_KEY_HERE")
-    AZURE_REGION = os.environ.get("AZURE_REGION", "YOUR_AZURE_REGION_HERE")
-    if "YOUR" in AZURE_KEY:
-        st.warning("警告：Azure 翻譯金鑰未配置。翻譯功能將無法正常工作。請在 secrets.toml 或環境變數中設定 AZURE_KEY 和 AZURE_REGION。")
+except:
+    AZURE_KEY = os.environ.get("AZURE_KEY", "YOUR_KEY")
+    AZURE_REGION = os.environ.get("AZURE_REGION", "YOUR_REGION")
 
-endpoint = "https://api.cognitive.microsofttranslator.com/translate"
-headers = {
-    "Ocp-Apim-Subscription-Key": AZURE_KEY,
-    "Ocp-Apim-Subscription-Region": AZURE_REGION,
-    "Content-type": "application/json"
-}
+ENDPOINT = "https://api.cognitive.microsofttranslator.com/translate"
 
-# --- KEGG Function (包含調試打印和兩次請求修正) ---
-def get_kegg_trade_name_and_japic(jp_name):
+# --- 核心查詢函數：KEGG 優先 ---
+def get_kegg_drug_info(jp_name, log_container):
     """
-    嘗試從 KEGG 獲取英文商標名 (欧文商標名) 和 JAPIC 代碼。
-    修正後邏輯：1. 搜尋頁面獲取 japic_code；2. 詳細頁面獲取歐文商標名。
+    通用查詢函數：嘗試從 KEGG 獲取英文名。
+    優先順序：歐文商標名 (Trade Name) > 英文一般名 (Generic Name)
     """
-    # 1. Search KEGG for the drug name
-    search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={jp_name}"
-    japic_code = None
-    trade_name = ""
+    if not jp_name or pd.isna(jp_name):
+        return None
+    
+    # 移除日文括號內的內容（通常是劑型或劑量，會干擾搜尋）
+    search_term = re.sub(r'［.*?］|（.*?）|\(.*?\)', '', str(jp_name)).strip()
+    
+    search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={search_term}"
     
     try:
-        search_resp = requests.get(search_url, timeout=10)
-        if search_resp.ok:
-            
-            # --- DEBUG: 檢查搜尋頁面內容 (請在終端機查看此輸出) ---
-            print(f"\n{'='*50}\nDEBUG: 藥品名稱 '{jp_name}' 的 KEGG 搜尋頁面內容：")
-            # 打印搜尋頁面的 HTML，截斷以避免過多輸出
-            print(search_resp.text[:2000] + "\n...") 
-            print("=" * 50)
-            # --------------------------------------------------------
-            
-            # 2. Extract JAPIC Code from the search result page
-            japic_match = re.search(r'japic_code=(\d+)', search_resp.text)
-            
+        log_container.write(f"🔍 KEGG 檢索中: `{search_term}`")
+        resp = requests.get(search_url, timeout=10)
+        if resp.ok:
+            # 1. 提取 JAPIC Code
+            japic_match = re.search(r'japic_code=(\d+)', resp.text)
             if japic_match:
                 japic_code = japic_match.group(1)
-                
-                print(f"DEBUG: 成功提取 JAPIC Code: {japic_code}") 
-                
-                # 3. Send a SECOND REQUEST to the specific drug page
                 drug_url = f"https://www.kegg.jp/medicus-bin/japicmed?japiccode={japic_code}"
                 drug_resp = requests.get(drug_url, timeout=10)
                 
                 if drug_resp.ok:
-                    # 4. Extract English Trade Name (欧文商標名) from the specific drug page
-                    # 使用最寬鬆的非貪婪匹配模式
+                    # 嘗試抓取 欧文商標名
                     trade_match = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
-                    trade_name = trade_match.group(1).strip() if trade_match else ""
+                    # 嘗試抓取 英文一般名 (用於成分名)
+                    generic_match = re.search(r'英文一般名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
                     
-                    if trade_name:
-                         print(f"DEBUG: 成功獲取歐文商標名: {trade_name.strip()}")
+                    res_trade = trade_match.group(1).strip() if trade_match else None
+                    res_generic = generic_match.group(1).strip() if generic_match else None
                     
-                    return japic_code, trade_name.strip()
-            else:
-                print(f"DEBUG: 錯誤！找不到藥品 '{jp_name}' 的 JAPIC Code。")
-                
+                    # 返回最合適的結果（優先返回商標名，若無則返回一般名）
+                    result = res_trade if res_trade else res_generic
+                    if result:
+                        log_container.write(f"✅ KEGG 命中: `{result}`")
+                        return result
     except Exception as e:
-        print(f"DEBUG Error for {jp_name}: {e}")
-        pass
-        
-    return None, ""
+        log_container.write(f"⚠️ KEGG 異常: {e}")
+    
+    log_container.write(f"ℹ️ KEGG 未命中，準備切換翻譯器...")
+    return None
 
-# --- Translator Function ---
 def ms_translator(text, from_lang="ja"):
-    """
-    使用 Azure Translator 將日文文本翻譯成英文。
-    """
-    if "YOUR_AZURE_KEY_HERE" in AZURE_KEY:
-        return f"Translation Failed (Key Not Set): {text}"
-        
-    body = [{"text": text}]
+    if not text or pd.isna(text): return ""
+    if "YOUR" in AZURE_KEY: return f"[未配置 API] {text}"
+    
+    headers = {
+        "Ocp-Apim-Subscription-Key": AZURE_KEY,
+        "Ocp-Apim-Subscription-Region": AZURE_REGION,
+        "Content-type": "application/json"
+    }
+    body = [{"text": str(text)}]
     params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
     try:
-        resp = requests.post(endpoint, params=params, headers=headers, json=body, timeout=10)
+        resp = requests.post(ENDPOINT, params=params, headers=headers, json=body, timeout=10)
         if resp.ok:
-            data = resp.json()
-            return data[0]["translations"][0]["text"]
-        else:
-            print(f"Azure Translator Error: {resp.status_code}, {resp.text}")
-            return f"Translation API Error: {text}"
-    except Exception:
-        return f"Translation Request Failed: {text}"
+            return resp.json()[0]["translations"][0]["text"]
+    except:
+        pass
+    return text
 
-# --- Data Cleaning and Header Detection Functions ---
+# --- 資料清理與標題偵測 (保持原有邏輯並優化) ---
 def find_header_row(df):
-    """
-    嘗試在 PMDA Excel 表格中找到標題列。
-    """
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
         row_str_clean = re.sub(r'[\s\u3000\r\n\t]+', '', row_str)
-        
-        # Heuristic 1
-        if row_str_clean.count('名') >= 2 and '成' in row_str_clean and '販' in row_str_clean:
-            return i
-        
-        # Heuristic 2
-        if ('成分名' in row_str_clean or ('成' in row_str_clean and '分' in row_str_clean and '名' in row_str_clean)) \
-           and ('販売名' in row_str_clean or '販賣名' in row_str_clean or ('販' in row_str_clean and '売' in row_str_clean and '名' in row_str_clean)):
+        if ('成分名' in row_str_clean or '成' in row_str_clean) and '販' in row_str_clean:
             return i
     return None
 
-def is_number(val):
-    """
-    檢查值是否為數字，並處理全角數字。
-    """
-    try:
-        val_str = str(val).strip()
-        # Convert full-width numbers to half-width
-        val_str = val_str.translate(str.maketrans('０１２３４５６７８９', '0123456789'))
-        float(val_str)
-        return True
-    except:
-        return False
-
 def clean_dataframe(df):
-    """
-    清理並正規化 DataFrame。
-    """
-    if not isinstance(df, pd.DataFrame):
-        return pd.DataFrame()
+    header_idx = find_header_row(df)
+    if header_idx is None: return None
+    
+    df.columns = df.iloc[header_idx]
+    df = df.iloc[header_idx + 1:].reset_index(drop=True)
     
     rename_map = {}
     for col in df.columns:
-        col_str = str(col)
-        col_clean = re.sub(r'[\s\u3000\r\n\t]+', '', col_str)
-        col_clean = re.sub(r'（.*?）|\(.*?\)', '', col_clean) # Remove parentheses
+        c_clean = re.sub(r'[\s\u3000\r\n\t]+', '', str(col))
+        if '販' in c_clean and '名' in c_clean: rename_map[col] = 'JP_Trade'
+        elif '成' in c_clean and '名' in c_clean: rename_map[col] = 'JP_Ingredient'
+        elif 'No' in c_clean: rename_map[col] = 'No.'
         
-        if '販' in col_clean and '名' in col_clean:
-            rename_map[col] = '販賣名/公司 (日文)'
-        elif '成' in col_clean and '名' in col_clean:
-            rename_map[col] = '成分名 (日文)'
-        elif 'No' in col_clean:
-            rename_map[col] = 'No.'
-            
     df = df.rename(columns=rename_map)
-    
-    # Filter rows based on the presence of key columns
-    if {'No.', '販賣名/公司 (日文)', '成分名 (日文)'}.issubset(df.columns):
-        df = df[
-            df['No.'].apply(is_number) &
-            df['販賣名/公司 (日文)'].astype(str).str.strip().ne('') &
-            df['成分名 (日文)'].astype(str).str.strip().ne('')
-        ]
-    elif '成分名 (日文)' in df.columns:
-        df = df[df['成分名 (日文)'].notnull() & (df['成分名 (日文)'].astype(str).str.strip() != '')]
-    else:
-        df = pd.DataFrame()
-        
-    if not df.empty:
-        # Final clean-up of empty rows/columns
-        df = df.dropna(how='all')
-        df = df[~(df.applymap(lambda x: str(x).strip() == '').all(axis=1))]
-        df = df.reset_index(drop=True)
-        
-    return df
+    # 確保必要欄位存在
+    if 'JP_Trade' in df.columns and 'JP_Ingredient' in df.columns:
+        return df.dropna(subset=['JP_Trade', 'JP_Ingredient']).reset_index(drop=True)
+    return None
 
-# --- Main Processing Functions ---
-def save_sheets_to_csv_auto_header(uploaded_file):
-    """
-    處理上傳的 Excel 文件中的所有分頁，自動偵測標題，清理數據並保存為臨時 CSV 文件。
-    """
-    xls = pd.ExcelFile(uploaded_file)
-    sheet_map = {} 
-    
-    for sheet_name in xls.sheet_names:
-        # 1. Read raw data without header to detect the actual header row
-        raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-        header_row = find_header_row(raw_df)
-        
-        if header_row is None:
-            continue
-            
-        # 2. Re-read data using the detected header row
-        df = pd.read_excel(xls, sheet_name=sheet_name, header=header_row)
-        
-        # 3. Clean and normalize the DataFrame
-        df = clean_dataframe(df)
-        
-        if df is None or df.empty:
-            continue
-            
-        # 4. Determine the file name (Month)
-        month_match = re.search(r'(\d+)月', sheet_name)
-        if not month_match:
-            for col in df.columns:
-                m = re.search(r'(\d+)月', str(col))
-                if m:
-                    month_match = m
-                    break
-        if month_match:
-            month = month_match.group(1) + "月"
-        else:
-            month = sheet_name
-            
-        # 5. Save as a temporary CSV
-        csv_name = f"{month}.csv"
-        df.to_csv(csv_name, index=False, encoding="utf-8")
-        sheet_map[month] = (csv_name, len(raw_df), len(df)) 
-        
-    return sheet_map
-
-def translate_and_combine(df):
-    """
-    迭代 DataFrame，優先嘗試 KEGG 查找，失敗後退回微軟翻譯。
-    """
-    trade_name_en_list = []
-    trade_name_source_list = []
-    ingredient_en_list = []
-    ingredient_source_list = []
-    
-    # Progress bar and status
-    status_text = st.empty()
-    progress_bar = st.progress(0)
-    total_rows = len(df)
-    
-    for idx, row in df.iterrows():
-        progress = (idx + 1) / total_rows
-        progress_bar.progress(progress)
-        status_text.text(f"正在翻譯第 {idx + 1}/{total_rows} 筆資料...")
-        
-        # --- Trade Name Translation (KEGG Priority) ---
-        jp_trade_name_raw = str(row.get('販賣名/公司 (日文)', ''))
-        
-        # 1. Try KEGG first 
-        japic_code, trade_name_en = get_kegg_trade_name_and_japic(jp_trade_name_raw)
-        
-        if trade_name_en and "Translation Failed" not in trade_name_en:
-            trade_name_source = "KEGG搜尋頁"
-        else:
-            # 2. Fallback to Azure Translator
-            trade_name_en = ms_translator(jp_trade_name_raw)
-            trade_name_source = "自動翻譯"
-            
-        # --- Ingredient Name Translation (Azure Translator) ---
-        ingredient_en = ms_translator(str(row.get('成分名 (日文)', '')))
-        ingredient_source = "自動翻譯"
-        
-        # Append results
-        trade_name_en_list.append(trade_name_en)
-        trade_name_source_list.append(trade_name_source)
-        ingredient_en_list.append(ingredient_en)
-        ingredient_source_list.append(ingredient_source)
-        
-        # Time delay to prevent hitting rate limits (現在處理兩個請求，延遲很重要)
-        time.sleep(0.34) 
-        
-    progress_bar.empty()
-    status_text.empty()
-    
-    # Combine translated results back into the DataFrame
-    df['Trade Name/Company (English)'] = trade_name_en_list
-    df['Trade Name/Company (來源)'] = trade_name_source_list
-    df['Ingredient Name (English)'] = ingredient_en_list
-    df['Ingredient Name (來源)'] = ingredient_source_list
-    
-    return df
-
-# --- Streamlit Main App ---
+# --- 主執行邏輯 ---
 def main():
-    st.set_page_config(layout="wide", page_title="PMDA 日本新藥翻譯列表生成器")
-    st.title("🇯🇵 PMDA 日本新藥翻譯列表生成器 (自動分頁轉 CSV + 翻譯)")
+    st.set_page_config(layout="wide", page_title="PMDA 專業翻譯工具")
+    st.title("🇯🇵 PMDA 日本新藥列表翻譯 (KEGG API 優先版)")
     
-    # File Uploader
-    uploaded_file = st.file_uploader("上傳 PMDA 公告 Excel 檔案", type=['xlsx', 'xls'])
+    uploaded_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx', 'xls'])
     
     if uploaded_file:
-        st.info(f"檔案名稱：**{uploaded_file.name}**，開始處理...")
-        
-        # 1. Process Excel sheets and save as temporary CSVs
-        month_csv_map = save_sheets_to_csv_auto_header(uploaded_file)
-        
-        if not month_csv_map:
-            st.warning("未偵測到任何有效分頁。請檢查 Excel 檔案格式是否符合 PMDA 公告表結構。")
-            return
+        xls = pd.ExcelFile(uploaded_file)
+        # 逐一處理分頁，實現「一個月一個月產出」
+        for sheet_name in xls.sheet_names:
+            raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+            df = clean_dataframe(raw_df)
             
-        st.success(f"成功識別 **{len(month_csv_map)}** 個有效分頁。開始進行翻譯...")
-
-        # 2. Translate each temporary CSV and display/provide download
-        for month, (csv_name, raw_len, clean_len) in month_csv_map.items():
-            
+            if df is None or df.empty:
+                continue
+                
             st.markdown(f"---")
-            st.subheader(f"📄 分頁：**{month}** (原始資料 {raw_len} 筆, 有效資料 {clean_len} 筆)")
+            st.subheader(f"📄 分頁：{sheet_name} (有效數據: {len(df)} 筆)")
             
-            try:
-                df = pd.read_csv(csv_name, encoding="utf-8")
+            with st.status(f"正在處理 {sheet_name}...", expanded=True) as status:
+                log_area = st.empty()
+                progress_bar = st.progress(0)
+                results = []
                 
-                if df.empty:
-                    st.warning(f"分頁 **{month}** 清理後為空。")
-                    continue
+                for idx, row in df.iterrows():
+                    # 1. 處理商品名
+                    jp_trade = row['JP_Trade']
+                    en_trade = get_kegg_drug_info(jp_trade, log_area)
+                    trade_src = "KEGG"
+                    if not en_trade:
+                        en_trade = ms_translator(jp_trade)
+                        trade_src = "Azure"
                     
-                translated_df = translate_and_combine(df)
+                    # 2. 處理成分名 (同樣優先嘗試 KEGG)
+                    jp_ing = row['JP_Ingredient']
+                    en_ing = get_kegg_drug_info(jp_ing, log_area)
+                    ing_src = "KEGG"
+                    if not en_ing:
+                        en_ing = ms_translator(jp_ing)
+                        ing_src = "Azure"
+                    
+                    results.append({
+                        "No.": row.get('No.', idx+1),
+                        "販賣名 (日)": jp_trade,
+                        "Trade Name (EN)": en_trade,
+                        "商標來源": trade_src,
+                        "成分名 (日)": jp_ing,
+                        "Ingredient (EN)": en_ing,
+                        "成分來源": ing_src
+                    })
+                    
+                    progress_bar.progress((idx + 1) / len(df))
+                    time.sleep(0.3) # 避免過快請求被封鎖
                 
-                # Display result
-                st.dataframe(translated_df, use_container_width=True, hide_index=True)
-                
-                # Download button
-                csv_export = translated_df.to_csv(index=False).encode('utf-8')
-                st.download_button(
-                    label=f"📥 下載 {month} 翻譯結果 (CSV)",
-                    data=csv_export,
-                    file_name=f"{month}_Translated.csv",
-                    mime='text/csv'
-                )
+                status.update(label=f"✅ {sheet_name} 翻譯完成！", state="complete", expanded=False)
             
-            except Exception as e:
-                st.error(f"處理分頁 **{month}** 時發生錯誤: {e}")
+            # 即時顯示該月結果
+            res_df = pd.DataFrame(results)
+            st.dataframe(res_df, use_container_width=True, hide_index=True)
             
-            finally:
-                # 3. Clean up the temporary CSV file
-                if os.path.exists(csv_name):
-                    os.remove(csv_name)
+            # 下載該月 CSV
+            csv = res_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig')
+            st.download_button(
+                label=f"📥 下載 {sheet_name} 翻譯結果",
+                data=csv,
+                file_name=f"PMDA_{sheet_name}_Translated.csv",
+                mime='text/csv',
+                key=f"dl_{sheet_name}"
+            )
 
 if __name__ == "__main__":
     main()
