@@ -11,27 +11,29 @@ try:
     AZURE_KEY = st.secrets["AZURE_KEY"]
     AZURE_REGION = st.secrets["AZURE_REGION"]
 except:
-    # 這裡建議保留空字串或環境變數，避免程式因 API Key 缺失而崩潰
     AZURE_KEY = os.environ.get("AZURE_KEY", "")
     AZURE_REGION = os.environ.get("AZURE_REGION", "eastasia")
 
 ENDPOINT = "https://api.cognitive.microsofttranslator.com/translate"
 
-# 初始化快取，確保重新整理時不會丟失已查詢數據
+# 初始化跨分頁快取
 if 'trans_cache' not in st.session_state:
     st.session_state.trans_cache = {}
 
-# --- 2. 核心校正函數：KEGG REST API ---
+# --- 2. 核心校正函數：強化版 KEGG REST API ---
 def get_kegg_rest_final(jp_name, log_container, is_ingredient=False):
     if not jp_name or pd.isna(jp_name) or str(jp_name).lower() == 'nan':
         return None
     
-    # 清洗名稱：移除括號、劑型、商號
+    # 【關鍵清洗邏輯】處理如 "スリンダ錠28(あすか製薬...)" -> "スリンダ"
+    # 移除括號及其內容
     clean_term = re.split(r'\(|（|［|\[', str(jp_name))[0]
+    # 移除劑型、數字、公司後綴
     clean_term = re.sub(r'錠|カプセル|注|シリンジ|配合|\d+|分|末|％|%|株式会社|製薬|㈱|アステラス|外用|液', '', clean_term).strip()
     
     if not clean_term or len(clean_term) < 2:
         return None
+        
     if clean_term in st.session_state.trans_cache:
         return st.session_state.trans_cache[clean_term]
 
@@ -41,10 +43,10 @@ def get_kegg_rest_final(jp_name, log_container, is_ingredient=False):
         f_resp = requests.get(find_url, timeout=5)
         
         if f_resp.ok and f_resp.text.strip():
-            # 取得首選藥物 ID
+            # 取得首選藥物 ID (例如 D11581)
             drug_id = f_resp.text.split('\n')[0].split('\t')[0].replace('dr:', '')
             
-            # 獲取詳細資料
+            # 獲取詳細資料 (包含 TH_NAME / EN_NAME)
             g_resp = requests.get(f"https://rest.kegg.jp/get/{drug_id}", timeout=5)
             if g_resp.ok:
                 content = g_resp.text
@@ -53,25 +55,26 @@ def get_kegg_rest_final(jp_name, log_container, is_ingredient=False):
                 
                 res = None
                 if is_ingredient:
+                    # 成分名優先尋找 EN_NAME (國際通用名)
                     res = en_match.group(1) if en_match else (th_match.group(1) if th_match else None)
                 else:
+                    # 商品名優先尋找 TH_NAME (官方歐文商標名，如 Slinda)
                     res = th_match.group(1) if th_match else (en_match.group(1) if en_match else None)
                 
                 if res:
+                    # 移除可能的分號別名，僅取主名稱
                     final_res = res.strip().split(';')[0]
-                    log_container.write(f"✅ KEGG 校正: `{clean_term}` -> `{final_res}`")
+                    log_container.write(f"✅ KEGG 命中: `{clean_term}` -> `{final_res}`")
                     st.session_state.trans_cache[clean_term] = final_res
                     return final_res
     except:
         pass
     return None
 
-# --- 3. 備援翻譯：Azure ---
+# --- 3. 備援翻譯：Azure Translator ---
 def ms_translator(text):
-    if not text or pd.isna(text) or str(text).lower() == 'nan':
-        return ""
-    if not AZURE_KEY:
-        return f"[未設定Key] {text}"
+    if not text or pd.isna(text) or str(text).lower() == 'nan' or not AZURE_KEY:
+        return str(text)
     
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_KEY,
@@ -88,7 +91,7 @@ def ms_translator(text):
         pass
     return str(text)
 
-# --- 4. 表格清理函數 ---
+# --- 4. 表格清理與標題定位 ---
 def find_header_row(df):
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
@@ -101,7 +104,6 @@ def clean_dataframe(df_raw):
     if h_idx is None:
         return None
     
-    # 複製資料避免警告
     df = df_raw.iloc[h_idx:].copy()
     df.columns = df.iloc[0]
     df = df[1:].reset_index(drop=True)
@@ -113,15 +115,15 @@ def clean_dataframe(df_raw):
         elif '成' in c_str and '名' in c_str: rename_map[col] = 'JP_Ingredient'
     
     df = df.rename(columns=rename_map)
-    # 確保關鍵欄位存在且不為空
     if 'JP_Trade' in df.columns and 'JP_Ingredient' in df.columns:
+        # 只保留關鍵欄位皆有值的資料
         return df.dropna(subset=['JP_Trade', 'JP_Ingredient']).reset_index(drop=True)
     return None
 
-# --- 5. 主程式 ---
+# --- 5. 主執行邏輯 ---
 def main():
-    st.set_page_config(layout="wide", page_title="PMDA 翻譯校正器")
-    st.title("💊 PMDA 專業翻譯 (修復版)")
+    st.set_page_config(layout="wide", page_title="PMDA 翻譯校正工具")
+    st.title("🇯🇵 PMDA 專業翻譯 (修正 NameError 版)")
     
     uploaded_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx'])
     
@@ -131,12 +133,12 @@ def main():
         
         for sheet_name in xls.sheet_names:
             raw_df_data = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-            df = clean_dataframe(raw_df_data) # 這裡會回傳處理後的 df 或 None
+            df = clean_dataframe(raw_df_data)
             
-            # 關鍵修正：確保 df 存在且不為空，才進入處理迴圈
+            # 【修復核心】檢查變數是否有效，避免 NameError
             if df is not None and not df.empty:
                 st.markdown(f"---")
-                st.subheader(f"📄 分頁：{sheet_name} ({len(df)} 筆)")
+                st.subheader(f"📄 分頁：{sheet_name} ({len(df)} 筆有效資料)")
                 
                 results = []
                 with st.status(f"正在處理 {sheet_name}...", expanded=True) as status:
@@ -147,7 +149,7 @@ def main():
                         jp_t = row['JP_Trade']
                         jp_i = row['JP_Ingredient']
                         
-                        # 處理商品名
+                        # 處理商品名 (優先從 KEGG 找商標名)
                         en_t = get_kegg_rest_final(jp_t, log_area, is_ingredient=False)
                         t_src = "KEGG" if en_t else "Azure"
                         if not en_t: en_t = ms_translator(jp_t)
@@ -167,7 +169,7 @@ def main():
                         })
                         progress_bar.progress((idx + 1) / len(df))
                     
-                    status.update(label=f"✅ {sheet_name} 完成", state="complete")
+                    status.update(label=f"✅ {sheet_name} 處理完成", state="complete")
                 
                 if results:
                     res_df = pd.DataFrame(results)
@@ -182,7 +184,7 @@ def main():
                         key=f"dl_{sheet_name}"
                     )
             else:
-                # 如果該分頁沒有可解析的資料，安靜地跳過
+                # 靜默跳過無效分頁
                 continue
 
 if __name__ == "__main__":
