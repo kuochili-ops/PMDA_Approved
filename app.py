@@ -6,100 +6,68 @@ import time
 import os
 from urllib.parse import quote
 
-# --- Azure Translator Setup ---
-try:
-    AZURE_KEY = st.secrets["AZURE_KEY"]
-    AZURE_REGION = st.secrets["AZURE_REGION"]
-except:
-    AZURE_KEY = os.environ.get("AZURE_KEY", "")
-    AZURE_REGION = os.environ.get("AZURE_REGION", "")
-
-ENDPOINT = "https://api.cognitive.microsofttranslator.com/translate"
-
-# --- 1. 依照您的原則：提取開頭連續片假名 ---
+# --- 核心邏輯：依照您的規則提取開頭片假名 ---
 def get_katakana_prefix(text):
-    """
-    辨識欄位一開始的片假名，直到非片假名為止。
-    """
     if not text or pd.isna(text): return None
     text = str(text).strip()
-    # 規則：^ 表示從頭開始，[ァ-ヶー・]+ 表示連續的片假名、長音、中點
     match = re.search(r'^([ァ-ヶー・]+)', text)
     return match.group(1) if match else None
 
-# --- 2. KEGG REST API 深度查詢 (修正編碼與路徑) ---
-def get_kegg_info(jp_text, log_container, is_trade=True):
-    # 提取您的關鍵字（如：スリンダ）
+# --- 核心邏輯：先網頁搜尋編號，再 API 獲取詳細資料 ---
+def get_kegg_info_hybrid(jp_text, log_container, is_trade=True):
     kw = get_katakana_prefix(jp_text)
     if not kw: return None
     
     try:
-        # 步驟 A: Find Drug ID
-        # 使用 URL 編碼確保片假名能被 API 識別
-        encoded_kw = quote(kw)
-        find_url = f"https://rest.kegg.jp/find/drug/{encoded_kw}"
+        # Step 1: 從 Medicus 網頁搜尋獲取 D編號 (例如 D03917)
+        # 這裡模擬瀏覽器請求
+        search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw)}"
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+        resp = requests.get(search_url, headers=headers, timeout=10)
         
-        resp = requests.get(find_url, timeout=10)
-        if not resp.ok or not resp.text.strip():
-            log_container.write(f"❌ KEGG 找不到關鍵字: `{kw}`")
+        # 使用正則尋找 /entry/DXXXXX
+        drug_id_match = re.search(r'/entry/(D\d+)', resp.text)
+        if not drug_id_match:
             return None
-            
-        # 取得第一筆 Entry ID (例如 dr:D03917)
-        first_line = resp.text.split('\n')[0]
-        drug_id = first_line.split('\t')[0] # 這裡會拿到 'drug:D03917'
         
-        # 步驟 B: Get Entry Details
-        get_url = f"https://rest.kegg.jp/get/{drug_id}"
-        get_resp = requests.get(get_url, timeout=10)
+        drug_id = drug_id_match.group(1)
+        log_container.write(f"🔍 `{kw}` 找到編號: `{drug_id}`")
+
+        # Step 2: 代入 rest.kegg.jp 獲取詳細資訊
+        # 注意：rest API 的 find 如果給 ID，會回傳 ID 所在的條目
+        api_url = f"https://rest.kegg.jp/get/{drug_id}"
+        api_resp = requests.get(api_url, timeout=10)
         
-        if get_resp.ok:
-            content = get_resp.text
-            
-            # 商品名邏輯：從 PRODUCTS 欄位提取英文
-            if is_trade:
-                # 匹配 PRODUCTS 後方的英文，通常在括號前
-                prod_match = re.search(r'PRODUCTS\s+([A-Za-z0-9\s\-\/]+)', content)
-                if prod_match:
-                    res = prod_match.group(1).strip()
-                    log_container.write(f"✅ KEGG 商品名命中: `{kw}` -> `{res}`")
-                    return res
-            
-            # 成分名邏輯：從 NAME 欄位找第一個分號後的英文字串
-            # 格式範例: NAME    Sulindac (JP18/USP/INN); Clinoril (TN)
-            lines = content.split('\n')
-            for line in lines:
+        if api_resp.ok:
+            content = api_resp.text
+            # 找到 NAME 行進行解析
+            # 格式範例: NAME    Drospirenone (JAN/USP/INN); Slynd (TN); Slinda (TN)
+            for line in content.split('\n'):
                 if line.startswith('NAME'):
-                    # 抓取分號後的內容
-                    parts = line.split(';')
-                    target_part = parts[1] if len(parts) > 1 else parts[0]
-                    # 提取純英文字母的部分 (過濾掉 JP18/USP 等)
-                    en_match = re.search(r'([A-Za-z][A-Za-z\s\-\/]{2,})', target_part)
-                    if en_match:
-                        res = en_match.group(1).strip()
-                        log_container.write(f"✅ KEGG 成分名命中: `{kw}` -> `{res}`")
+                    # 移除 NAME 標籤
+                    parts_str = line.replace('NAME', '').strip()
+                    # 以分號拆分
+                    parts = [p.strip() for p in parts_str.split(';')]
+                    
+                    if is_trade:
+                        # 找商品名：帶有 (TN) 的部分
+                        for p in parts:
+                            if '(TN)' in p:
+                                log_container.write(f"✅ 命中商品名: `{p.replace('(TN)', '').strip()}`")
+                                return p.replace('(TN)', '').strip()
+                        # 若沒標註 TN，取最後一個部分嘗試
+                        return re.sub(r'\(.*?\)', '', parts[-1]).strip()
+                    else:
+                        # 找成分名：通常是第一個部分
+                        res = re.sub(r'\(.*?\)', '', parts[0]).strip()
+                        log_container.write(f"✅ 命中成分名: `{res}`")
                         return res
+                        
     except Exception as e:
-        log_container.write(f"⚠️ KEGG 異常: {str(e)}")
-    
+        log_container.write(f"⚠️ 檢索異常: {str(e)}")
     return None
 
-def ms_translator(text, from_lang="ja"):
-    if not text or pd.isna(text): return ""
-    if not AZURE_KEY: return text
-    headers = {
-        "Ocp-Apim-Subscription-Key": AZURE_KEY,
-        "Ocp-Apim-Subscription-Region": AZURE_REGION,
-        "Content-type": "application/json"
-    }
-    body = [{"text": str(text)}]
-    params = {"api-version": "3.0", "from": from_lang, "to": ["en"]}
-    try:
-        resp = requests.post(ENDPOINT, params=params, headers=headers, json=body, timeout=5)
-        if resp.ok: return resp.json()[0]["translations"][0]["text"]
-    except: pass
-    return text
-
-# --- 3. 精確資料清理 (維持 10 筆項目) ---
+# --- 資料清理邏輯 (保持 10 筆不膨脹) ---
 def clean_dataframe(df):
     header_idx = None
     for i, row in df.iterrows():
@@ -121,62 +89,43 @@ def clean_dataframe(df):
     df = df.rename(columns=rename_map)
 
     if 'JP_Trade' in df.columns:
+        # 過濾空行，且確保 No. 是數字
         df = df.dropna(subset=['JP_Trade'])
         if 'No.' in df.columns:
-            # 濾除 Excel 底部雜質，只留數字編號行
             df = df[df['No.'].apply(lambda x: str(x).strip().replace('.0','').isdigit())]
         return df.reset_index(drop=True)
     return None
 
-# --- 4. 主執行邏輯 ---
+# --- 主程式 ---
 def main():
-    st.set_page_config(layout="wide", page_title="PMDA 翻譯器")
-    st.title("💊 PMDA 日本新藥清單翻譯 (KEGG REST API 修正版)")
+    st.set_page_config(layout="wide")
+    st.title("💊 PMDA 翻譯 (KEGG 網頁+API 混合版)")
     
-    uploaded_file = st.file_uploader("上傳 PMDA Excel", type=['xlsx'])
-    
+    uploaded_file = st.file_uploader("上傳 Excel", type=['xlsx'])
     if uploaded_file:
         xls = pd.ExcelFile(uploaded_file)
         for sheet_name in xls.sheet_names:
             raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
             df = clean_dataframe(raw_df)
-            
             if df is None or df.empty: continue
                 
-            st.markdown(f"### 📄 分頁：{sheet_name} (有效數據: {len(df)} 筆)")
-            
-            with st.status(f"處理中...", expanded=True) as status:
+            st.write(f"### 📄 分頁：{sheet_name}")
+            with st.status(f"正在檢索 {sheet_name}...", expanded=True) as status:
                 log_area = st.empty()
-                progress_bar = st.progress(0)
                 results = []
-                
                 for idx, row in df.iterrows():
-                    jp_trade = row['JP_Trade']
-                    jp_ing = row.get('JP_Ingredient', '')
-
-                    # 執行翻譯邏輯
-                    en_trade = get_kegg_info(jp_trade, log_area, is_trade=True)
-                    en_ing = get_kegg_info(jp_ing, log_area, is_trade=False)
-                    
-                    t_src = "KEGG" if en_trade else "Azure"
-                    i_src = "KEGG" if en_ing else "Azure"
-                    
-                    if not en_trade: en_trade = ms_translator(jp_trade)
-                    if not en_ing: en_ing = ms_translator(jp_ing)
+                    # 執行檢索
+                    en_trade = get_kegg_info_hybrid(row['JP_Trade'], log_area, is_trade=True)
+                    en_ing = get_kegg_info_hybrid(row['JP_Ingredient'], log_area, is_trade=False)
                     
                     results.append({
                         "No.": row.get('No.', idx+1),
-                        "商品名(日)": jp_trade,
-                        "Trade Name (EN)": en_trade,
-                        "來源(T)": t_src,
-                        "成分名(日)": jp_ing,
-                        "Ingredient (EN)": en_ing,
-                        "來源(I)": i_src
+                        "商品名(日)": row['JP_Trade'],
+                        "Trade Name (EN)": en_trade if en_trade else "[Azure] " + str(row['JP_Trade']),
+                        "成分名(日)": row['JP_Ingredient'],
+                        "Ingredient (EN)": en_ing if en_ing else "[Azure] " + str(row['JP_Ingredient'])
                     })
-                    progress_bar.progress((idx + 1) / len(df))
-                
-                status.update(label="✅ 處理完成", state="complete")
-            
+                status.update(label="完成", state="complete")
             st.dataframe(pd.DataFrame(results), use_container_width=True, hide_index=True)
 
 if __name__ == "__main__":
