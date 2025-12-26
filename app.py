@@ -15,79 +15,89 @@ except:
 
 ENDPOINT = "https://api.cognitive.microsofttranslator.com/translate"
 
-# --- 核心查詢函數：KEGG 優先 ---
+# --- 核心邏輯：提取規則 ---
 
 def extract_keyword(text, is_trade_name=True):
     """
-    根據規則提取關鍵字：
-    1. 商品名：第一個片假名詞（漢字前）
+    實作規則：
+    1. 商品名：第一個片假名詞 (漢字前)
     2. 成分名：第一個片假名詞
     """
     if not text or pd.isna(text):
         return None
     
-    # 清理掉括號與換行符號
-    text = re.sub(r'［.*?］|（.*?）|\(.*?\)', '', str(text))
-    text = text.replace('\n', ' ').strip()
+    # 清理掉常見的雜質符號，但保留片假名
+    text = str(text).replace('\n', ' ').strip()
+    text = re.sub(r'［.*?］|（.*?）|\(.*?\)', '', text)
 
     if is_trade_name:
-        # 尋找漢字之前的片假名詞組
-        # [ァ-ヶー]+ 匹配連續的片假名
-        match = re.search(r'^([ァ-ヶー]+)', text)
+        # 尋找開頭的片假名，直到遇到漢字或空格為止
+        match = re.search(r'^([ァ-ヶー・]+)', text)
     else:
         # 尋找第一個出現的片假名詞組
-        match = re.search(r'([ァ-ヶー]+)', text)
+        match = re.search(r'([ァ-ヶー・]+)', text)
     
-    return match.group(1) if match else text[:10] # 若無片假名則取前10碼兜底
+    return match.group(1) if match else None
+
+# --- 核心查詢函數：KEGG REST API ---
 
 def get_kegg_drug_info(jp_raw_text, log_container, is_trade_name=True):
     """
-    使用 KEGG API 檢索。
-    is_trade_name=True: 搜尋歐文商標名
-    is_trade_name=False: 搜尋歐文一般名 (成分)
+    使用 KEGG REST API (find & get) 進行檢索
     """
     search_term = extract_keyword(jp_raw_text, is_trade_name)
-    
     if not search_term:
         return None
     
-    # 這裡使用 KEGG Medicus 的搜尋網址
-    search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={search_term}"
-    
     try:
-        log_container.write(f"🔍 KEGG 檢索關鍵字: `{search_term}` ({'商品' if is_trade_name else '成分'})")
-        resp = requests.get(search_url, timeout=10)
-        if resp.ok:
-            # 提取 JAPIC Code (進入詳細頁面)
-            japic_match = re.search(r'japic_code=(\d+)', resp.text)
-            if japic_match:
-                japic_code = japic_match.group(1)
-                drug_url = f"https://www.kegg.jp/medicus-bin/japicmed?japiccode={japic_code}"
-                drug_resp = requests.get(drug_url, timeout=10)
+        # 步驟 1: 使用 find 尋找藥品 ID
+        # https://rest.kegg.jp/find/drug/keyword
+        find_url = f"https://rest.kegg.jp/find/drug/{search_term}"
+        resp = requests.get(find_url, timeout=10)
+        
+        if resp.ok and resp.text.strip():
+            # 取結果的第一行第一欄 (dr:Dxxxxx)
+            first_line = resp.text.split('\n')[0]
+            if not first_line: return None
+            drug_id = first_line.split('\t')[0]
+            
+            # 步驟 2: 使用 get 獲取該 ID 的完整資訊
+            # https://rest.kegg.jp/get/dr:Dxxxxx
+            get_url = f"https://rest.kegg.jp/get/{drug_id}"
+            get_resp = requests.get(get_url, timeout=10)
+            
+            if get_resp.ok:
+                content = get_resp.text
                 
-                if drug_resp.ok:
-                    # 根據類型抓取不同欄位
-                    if is_trade_name:
-                        # 抓取 欧文商標名
-                        match = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
-                    else:
-                        # 抓取 英文一般名 (用於成分名)
-                        match = re.search(r'英文一般名.*?:\s*(.*?)(?=<)', drug_resp.text, re.DOTALL)
-                    
-                    if match:
-                        result = match.group(1).strip()
-                        # 去除可能的 HTML tag
-                        result = re.sub(r'<.*?>', '', result)
-                        log_container.write(f"✅ KEGG 命中: `{result}`")
-                        return result
+                if is_trade_name:
+                    # 商品名規則：在 PRODUCTS 欄位中尋找 (英文名)
+                    # 範例: PRODUCTS    Tamiflu (Roche, Chugai); ...
+                    prod_match = re.search(r'PRODUCTS\s+.*?([A-Za-z\s\-,\./]+)\s*\(', content)
+                    if prod_match:
+                        return prod_match.group(1).strip()
+                    # 備案：從 NAME 欄位找逗號後的英文
+                    name_match = re.search(r'NAME\s+[^;]+?;\s*([^;\n]+)', content)
+                    if name_match and re.search(r'[A-Za-z]', name_match.group(1)):
+                        return name_match.group(1).strip()
+                else:
+                    # 成分名規則：從 NAME 欄位找分號或逗號後的英文
+                    # 範例: NAME    Oseltamivir phosphate; ...
+                    name_match = re.search(r'NAME\s+[^;]+?;\s*([^;\n]+)', content)
+                    if name_match:
+                        en_name = name_match.group(1).strip()
+                        # 去除可能的括號備註
+                        en_name = re.sub(r'\(.*?\)', '', en_name).strip()
+                        return en_name
+
+        log_container.write(f"ℹ️ KEGG API 未命中關鍵字: `{search_term}`")
     except Exception as e:
-        log_container.write(f"⚠️ KEGG 異常: {e}")
+        log_container.write(f"⚠️ KEGG API 異常: {e}")
     
     return None
 
 def ms_translator(text, from_lang="ja"):
     if not text or pd.isna(text): return ""
-    if "YOUR" in AZURE_KEY: return f"[未配置 API] {text}"
+    if "YOUR" in AZURE_KEY or AZURE_KEY == "": return f"[未配置 API] {text}"
     
     headers = {
         "Ocp-Apim-Subscription-Key": AZURE_KEY,
@@ -105,6 +115,7 @@ def ms_translator(text, from_lang="ja"):
     return text
 
 # --- 資料清理與標題偵測 ---
+
 def find_header_row(df):
     for i, row in df.iterrows():
         row_str = ''.join([str(cell) for cell in row if pd.notnull(cell)])
@@ -133,9 +144,11 @@ def clean_dataframe(df):
     return None
 
 # --- 主執行邏輯 ---
+
 def main():
     st.set_page_config(layout="wide", page_title="PMDA 專業翻譯工具")
-    st.title("🇯🇵 PMDA 日本新藥列表翻譯 (KEGG API 關鍵字強化版)")
+    st.title("🇯🇵 PMDA 日本新藥列表翻譯 (KEGG REST API 版)")
+    st.info("本版本優先從 KEGG REST API 獲取官方歐文商標名與一般名。")
     
     uploaded_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx', 'xls'])
     
@@ -157,18 +170,18 @@ def main():
                 results = []
                 
                 for idx, row in df.iterrows():
-                    # 1. 處理商品名 (專門找 Trade Name)
+                    # 1. 處理商品名
                     jp_trade = row['JP_Trade']
                     en_trade = get_kegg_drug_info(jp_trade, log_area, is_trade_name=True)
-                    trade_src = "KEGG"
+                    trade_src = "KEGG API"
                     if not en_trade:
                         en_trade = ms_translator(jp_trade)
                         trade_src = "Azure"
                     
-                    # 2. 處理成分名 (專門找 Generic Name)
+                    # 2. 處理成分名
                     jp_ing = row['JP_Ingredient']
                     en_ing = get_kegg_drug_info(jp_ing, log_area, is_trade_name=False)
-                    ing_src = "KEGG"
+                    ing_src = "KEGG API"
                     if not en_ing:
                         en_ing = ms_translator(jp_ing)
                         ing_src = "Azure"
@@ -184,9 +197,9 @@ def main():
                     })
                     
                     progress_bar.progress((idx + 1) / len(df))
-                    time.sleep(0.5) # 適度延遲避免請求過頻繁
+                    time.sleep(0.2) # REST API 限制較少，速度可加快
                 
-                status.update(label=f"✅ {sheet_name} 翻譯完成！", state="complete", expanded=False)
+                status.update(label=f"✅ {sheet_name} 處理完成！", state="complete", expanded=False)
             
             res_df = pd.DataFrame(results)
             st.dataframe(res_df, use_container_width=True, hide_index=True)
