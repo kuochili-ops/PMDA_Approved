@@ -6,38 +6,32 @@ import time
 from urllib.parse import quote
 import io
 
-# 版本標記：2025-12-29 14:15
+# 版本標記：2025-12-29 14:45
 
-# --- 1. 片假名提取 (修正版：不論位置，抓取第一串連續片假名) ---
+# --- 1. 片假名提取工具 ---
 def get_katakana_prefix(text):
-    if not text or pd.isna(text): return None
+    if not text or pd.isna(text): return ""
     text = str(text).strip()
-    # 修正邏輯：搜尋字串中第一組出現的片假名（包含長音符與點）
+    # 找尋第一組出現的片假名（包含長音符與中點）
     match = re.search(r'([ァ-ヶー・]+)', text)
-    if match:
-        result = match.group(1)
-        # 排除掉太短的無意義字元
-        return result if len(result) > 1 else None
-    return None
+    return match.group(1) if match else ""
 
-# --- 2. 檢索邏輯 (強化 JAPIC 第一順位) ---
-def get_kegg_advanced_info(jp_text, is_trade=True):
-    kw = get_katakana_prefix(jp_text)
-    if not kw: return None
+# --- 2. 核心檢索邏輯 ---
+def get_kegg_advanced_info(kw, is_trade=True):
+    if not kw or len(kw) < 2: return None
     
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     session = requests.Session()
 
     try:
-        # 優先搜尋 JAPIC
+        # 搜尋 JAPIC
         search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw)}"
         resp = session.get(search_url, headers=headers, timeout=10)
         html = resp.text
 
-        # 1. 嘗試抓取 JAPIC Code (可能是直接進入或列表頁)
+        # 找 JAPIC Code
         japic_match = re.search(r'japic_code=(\d+)', html)
         if not japic_match:
-            # 列表頁備援
             list_match = re.search(r'href="[^"]*japic_code=(\d+)"', html)
             japic_code = list_match.group(1) if list_match else None
         else:
@@ -58,7 +52,7 @@ def get_kegg_advanced_info(jp_text, is_trade=True):
                     trade_match = re.search(r'class="md_td_en">([^<]*)</td>', p_resp, re.S)
                     if trade_match: return trade_match.group(1).strip()
         
-        # 2. 備援：如果 JAPIC 沒結果，嘗試Rest API (D編號)
+        # 備援：D編號
         entry_match = re.search(r'/entry/(D\d+)', html)
         if entry_match:
             d_resp = session.get(f"https://rest.kegg.jp/get/{entry_match.group(1)}").text
@@ -68,7 +62,7 @@ def get_kegg_advanced_info(jp_text, is_trade=True):
     except: pass
     return None
 
-# --- 3. 資料清理 (強化座標校正) ---
+# --- 3. 資料清理與獨立欄位生成 ---
 def clean_dataframe(df):
     header_idx = None
     cols = {}
@@ -88,21 +82,29 @@ def clean_dataframe(df):
     final_rows = []
     for _, row in df.iloc[header_idx + 1:].iterrows():
         val_no = str(row.iloc[cols.get('No', 0)]).strip().replace('.0','')
-        # 遇到非數字 No 且已經有資料，視為結尾
         if not val_no.isdigit():
             if len(final_rows) > 0: break
             continue
             
+        trade_full = str(row.iloc[cols['Trade']]).strip()
+        ing_full = str(row.iloc[cols['Ing']]).strip()
+        
+        # 生成獨立片假名欄位
+        kw_t = get_katakana_prefix(trade_full)
+        kw_i = get_katakana_prefix(ing_full)
+            
         final_rows.append({
             "No.": val_no,
-            "JP_Trade": str(row.iloc[cols['Trade']]).strip(),
-            "JP_Ingredient": str(row.iloc[cols['Ing']]).strip()
+            "商品名(日)": trade_full,
+            "商品名(關鍵字)": kw_t, # 獨立出的欄位
+            "成分名(日)": ing_full,
+            "成分名(關鍵字)": kw_i  # 獨立出的欄位
         })
     return pd.DataFrame(final_rows)
 
 # --- 4. Streamlit UI ---
 st.set_page_config(layout="wide")
-st.title("💊 PMDA 藥品清單翻譯 (片假名強化版：2025-12-29 14:15)")
+st.title("💊 PMDA 翻譯 (片假名獨立顯示版：2025-12-29 14:45)")
 
 f = st.file_uploader("上傳 Excel", type=['xlsx'])
 if f:
@@ -111,34 +113,35 @@ if f:
     if sheet:
         df = clean_dataframe(pd.read_excel(xls, sheet_name=sheet, header=None))
         if df is not None:
-            st.success(f"✅ 辨識成功！數據：{len(df)} 筆")
-            if st.button("🚀 執行片假名精確檢索"):
+            st.success(f"✅ 辨識成功！請檢查下方「關鍵字」欄位是否提取正確。")
+            # 讓使用者先看資料提取得對不對
+            st.dataframe(df, use_container_width=True)
+            
+            if st.button("🚀 確認關鍵字正確，開始翻譯"):
                 results = []
                 bar = st.progress(0)
                 log = st.empty()
                 for i, r in df.iterrows():
-                    # 這裡會在 UI 顯示抓到的關鍵字，您可以確認是否正確
-                    kw_t = get_katakana_prefix(r['JP_Trade'])
-                    kw_i = get_katakana_prefix(r['JP_Ingredient'])
-                    log.text(f"No.{r['No.']} 關鍵字：[{kw_t}] / [{kw_i}]")
+                    log.text(f"正在檢索: {r['商品名(關鍵字)']}...")
                     
-                    en_t = get_kegg_advanced_info(r['JP_Trade'], True)
-                    en_i = get_kegg_advanced_info(r['JP_Ingredient'], False)
+                    en_t = get_kegg_advanced_info(r['商品名(關鍵字)'], True)
+                    en_i = get_kegg_advanced_info(r['成分名(關鍵字)'], False)
                     
                     results.append({
                         "No.": r['No.'],
-                        "商品名(日)": r['JP_Trade'],
+                        "商品名(日)": r['商品名(日)'],
                         "Trade Name (EN)": en_t or "[查無結果]",
-                        "成分名(日)": r['JP_Ingredient'],
+                        "成分名(日)": r['成分名(日)'],
                         "Ingredient (EN)": en_i or "[查無結果]"
                     })
                     bar.progress((i + 1) / len(df))
                     time.sleep(0.5)
                 
                 res_df = pd.DataFrame(results)
+                st.subheader("📊 翻譯結果")
                 st.dataframe(res_df, use_container_width=True)
                 
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                     res_df.to_excel(writer, index=False)
-                st.download_button("📥 下載 Excel", output.getvalue(), f"{sheet}_EN.xlsx")
+                st.download_button("📥 下載翻譯結果", output.getvalue(), f"PMDA_EN_{sheet}.xlsx")
