@@ -2,150 +2,117 @@ import streamlit as st
 import pandas as pd
 import requests
 import re
-import time
-from urllib.parse import quote
 
-# --- 1. 依照您的原則：精確提取開頭連續片假名 ---
-def get_katakana_prefix(text):
-    if not text or pd.isna(text): return None
-    text = str(text).strip().split('\n')[0] # 只取第一行
-    match = re.search(r'^([ァ-ヶー・]+)', text)
-    return match.group(1) if match else None
-
-# --- 2. 核心檢索邏輯：真人模擬深度爬取 ---
-def get_kegg_advanced_info(jp_text, log_container, is_trade=True):
-    kw = get_katakana_prefix(jp_text)
-    if not kw: return None
-    
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://www.kegg.jp/medicus-bin/search_drug"
-    }
-    session = requests.Session()
-
+# --- 核心翻譯與 KEGG 函數 ---
+def get_kegg_info(name, log):
+    if not name or pd.isna(name): return None
+    # 僅取藥名部分，切除公司名與劑型
+    clean_n = str(name).split('\n')[0].split('（')[0].split('(')[0].strip()
+    clean_n = re.sub(r'［.*?］|（.*?）', '', clean_n)
+    if len(clean_n) < 2: return None
     try:
-        search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw)}"
-        resp = session.get(search_url, headers=headers, timeout=15)
-        
-        # 尋找 JAPIC Code
-        japic_match = re.search(r'japic_code=(\d+)', resp.text)
-        if not japic_match: return None
-
-        japic_code = japic_match.group(1)
-        
-        # Step 2: 進入 JAPIC 總表頁
-        time.sleep(0.5) 
-        med_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
-        med_resp = session.get(med_url, headers=headers, timeout=15)
-        med_html = med_resp.text
-
-        if not is_trade:
-            # 抓取成分名 (欧文一般名)
-            ing_match = re.search(r'<th>欧文一般名</th>\s*<td>(.*?)</td>', med_html, re.S)
-            return re.sub(r'<.*?>', '', ing_match.group(1)).strip() if ing_match else None
-        else:
-            # 抓取商品名 (Trade Name)
-            prod_id_match = re.search(r'japic_med_product\?id=([\d-]+)', med_html)
-            if prod_id_match:
-                prod_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={prod_id_match.group(1)}"
-                prod_resp = session.get(prod_url, headers=headers, timeout=15)
-                trade_match = re.search(r'<td class="md_td_en">(.*?)</td>', prod_resp.text, re.S)
-                return trade_match.group(1).strip() if trade_match else None
-    except:
-        pass
+        url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={clean_n}"
+        r = requests.get(url, timeout=10)
+        m = re.search(r'japic_code=(\d+)', r.text)
+        if m:
+            dr = requests.get(f"https://www.kegg.jp/medicus-bin/japicmed?japiccode={m.group(1)}", timeout=10)
+            t = re.search(r'欧文商標名.*?:\s*(.*?)(?=<)', dr.text, re.DOTALL)
+            g = re.search(r'英文一般名.*?:\s*(.*?)(?=<)', dr.text, re.DOTALL)
+            return (t.group(1) if t else (g.group(1) if g else None)).strip()
+    except: pass
     return None
 
-# --- 3. 精確資料清理：模擬 Excel 藍框截斷 ---
-def clean_dataframe(df):
-    # 搜尋標題行 (通常在第 3 行，Index 2)
-    header_idx = None
-    for i in range(min(10, len(df))):
-        row_str = "".join([str(c) for c in df.iloc[i] if pd.notnull(c)])
-        row_str = re.sub(r'[\s\u3000\n]+', '', row_str)
-        if '販賣名' in row_str or ('成分' in row_str and '名' in row_str):
-            header_idx = i
-            break
-            
-    if header_idx is None: return None
+def azure_translate(text, key, region):
+    if not text or pd.isna(text): return ""
+    endpoint = "https://api.cognitive.microsofttranslator.com/translate"
+    headers = {"Ocp-Apim-Subscription-Key": key, "Ocp-Apim-Subscription-Region": region, "Content-type": "application/json"}
+    body = [{"text": str(text).replace('\n', ' ')}]
+    try:
+        r = requests.post(endpoint, params={"api-version":"3.0","from":"ja","to":["en"]}, headers=headers, json=body, timeout=10)
+        return r.json()[0]["translations"][0]["text"] if r.ok else text
+    except: return text
+
+# --- 藍框邊界偵測邏輯 ---
+def clean_pmda_v6(df):
+    if len(df) < 3: return None
     
-    # 設定標題
-    df.columns = df.iloc[header_idx]
-    temp_df = df.iloc[header_idx + 1:].reset_index(drop=True)
+    # 直接鎖定第三行 (Index 2)
+    header_row = df.iloc[2]
+    # 清理所有隱形空格
+    clean_h = [re.sub(r'[\s\u3000\n]+', '', str(x)) for x in header_row]
     
-    # 欄位標準化
-    rename_map = {}
-    for col in temp_df.columns:
-        c_clean = re.sub(r'[\s\u3000\n]+', '', str(col))
-        if '販賣名' in c_clean: rename_map[col] = 'JP_Trade'
-        elif '成分名' in c_clean: rename_map[col] = 'JP_Ingredient'
-        elif 'No' in c_clean: rename_map[col] = 'No.'
-    
-    temp_df = temp_df.rename(columns=rename_map)
-    
-    # --- 🛑 核心修復：強制截斷「藍框」外資料 ---
-    valid_rows = []
-    for _, row in temp_df.iterrows():
-        val_no = str(row.get('No.', '')).strip().replace('.0','')
-        val_trade = str(row.get('JP_Trade', '')).strip()
+    # 定位欄位
+    idx_no, idx_trade, idx_ing = None, None, None
+    for i, h in enumerate(clean_h):
+        if 'No' in h: idx_no = i
+        if '販賣名' in h: idx_trade = i
+        if '成分名' in h: idx_ing = i
         
-        # 截斷機制：如果 No. 不是數字 (可能是空白或注1)，立即停止
+    if idx_trade is None or idx_ing is None: return None
+
+    # 從第四行開始掃描
+    rows = []
+    for i in range(3, len(df)):
+        row = df.iloc[i]
+        val_no = str(row[idx_no]).strip() if idx_no is not None else ""
+        val_trade = str(row[idx_trade]).strip()
+        val_ing = str(row[idx_ing]).strip()
+
+        # 🛑 關鍵：偵測藍框邊界
+        # 如果 No 欄位不是純數字，且已經有抓到資料，就代表進入了藍框外的「注」或「空行」
         if not val_no.isdigit():
-            if len(valid_rows) > 0: break # 如果已經抓過資料了，遇到非數字就當作結束
-            continue # 開頭的空行則跳過
-            
+            if len(rows) > 0: break # 強制切斷
+            continue 
+        
+        # 排除完全空行
         if val_trade == "" or val_trade.lower() == 'nan': break
-            
-        valid_rows.append(row)
-        
-    return pd.DataFrame(valid_rows).reset_index(drop=True)
 
-# --- 4. 主程式 ---
-def main():
-    st.set_page_config(layout="wide", page_title="PMDA 翻譯終極版")
-    st.title("💊 PMDA 藥品清單翻譯 (JAPIC 深度路徑修正版)")
-    
-    uploaded_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx'])
-    
-    if uploaded_file:
-        xls = pd.ExcelFile(uploaded_file)
-        # 讓使用者可以選擇分頁
-        sheet_selected = st.selectbox("選擇要處理的分頁 (月份)：", xls.sheet_names)
+        rows.append({"No.": val_no, "Trade": val_trade, "Ing": val_ing})
         
-        if sheet_selected:
-            raw_df = pd.read_excel(xls, sheet_name=sheet_selected, header=None)
-            df = clean_dataframe(raw_df)
-            
-            if df is not None and not df.empty:
-                st.success(f"✅ 成功辨識 {len(df)} 筆紀錄 (已過濾藍框外無效區域)")
-                st.dataframe(df.head(5), use_container_width=True)
-                
-                if st.button(f"開始執行 {sheet_selected} 翻譯"):
-                    results = []
-                    status = st.status("正在進行深度檢索...", expanded=True)
-                    log_area = st.empty()
-                    pbar = st.progress(0)
-                    
-                    for idx, row in df.iterrows():
-                        # 執行檢索
-                        en_trade = get_kegg_advanced_info(row['JP_Trade'], log_area, is_trade=True)
-                        en_ing = get_kegg_advanced_info(row['JP_Ingredient'], log_area, is_trade=False)
-                        
-                        results.append({
-                            "No.": row.get('No.', idx+1),
-                            "商品名(日)": row['JP_Trade'],
-                            "Trade Name (EN)": en_trade if en_trade else "[查無結果]",
-                            "成分名(日)": row['JP_Ingredient'],
-                            "Ingredient (EN)": en_ing if en_ing else "[查無結果]"
-                        })
-                        pbar.progress((idx + 1) / len(df))
-                        time.sleep(0.3) # 防止請求過快
-                        
-                    status.update(label="✅ 檢索完成", state="complete")
-                    res_df = pd.DataFrame(results)
-                    st.dataframe(res_df, use_container_width=True)
-                    st.download_button("📥 下載翻譯結果", res_df.to_csv(index=False, encoding='utf-8-sig').encode('utf-8-sig'), f"PMDA_{sheet_selected}.csv")
-            else:
-                st.error("⚠️ 無法辨識有效紀錄。請確認分頁第 3 行包含『販賣名』與『成分名』。")
+    return pd.DataFrame(rows)
 
-if __name__ == "__main__":
-    main()
+# --- Streamlit 介面 ---
+st.set_page_config(layout="wide", page_title="PMDA 翻譯 v6.0")
+st.title("🇯🇵 PMDA 翻譯工具 (v6.0 藍框區域修復版)")
+st.sidebar.markdown("[🔗 PMDA 官網品目一覧](https://www.pmda.go.jp/review-services/drug-reviews/review-information/p-drugs/0010.html)")
+
+# 設定 Azure Key
+a_key = st.sidebar.text_input("Azure Key", type="password")
+a_reg = st.sidebar.text_input("Azure Region", value="eastasia")
+
+up = st.file_uploader("上傳 PMDA 檔案", type=['xlsx', 'csv'])
+
+if up:
+    # 根據副檔名讀取
+    if up.name.endswith('.csv'):
+        df_raw = pd.read_csv(up, header=None)
+    else:
+        xls = pd.ExcelFile(up)
+        sheet = st.selectbox("選擇分頁", xls.sheet_names)
+        df_raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+        
+    df_clean = clean_pmda_v6(df_raw)
+    
+    if df_clean is not None and not df_clean.empty:
+        st.success(f"✅ 辨識成功！偵測到 {len(df_clean)} 筆有效紀錄（已排除藍框外雜訊）。")
+        st.dataframe(df_clean, use_container_width=True)
+        
+        if st.button("🚀 開始翻譯"):
+            res = []
+            status = st.status("正在檢索...", expanded=True)
+            log_box = st.empty()
+            for idx, r in df_clean.iterrows():
+                # KEGG -> Azure 雙層邏輯
+                en_t = get_kegg_info(r['Trade'], log_box) or azure_translate(r['Trade'], a_key, a_reg)
+                en_i = get_kegg_info(r['Ing'], log_box) or azure_translate(r['Ing'], a_key, a_reg)
+                res.append({
+                    "No.": r['No.'],
+                    "日文販賣名": r['Trade'],
+                    "英文販賣名": en_t,
+                    "日文成分名": r['Ing'],
+                    "英文成分名": en_i
+                })
+            status.update(label="✅ 翻譯完成", state="complete")
+            st.dataframe(pd.DataFrame(res), use_container_width=True)
+    else:
+        st.error("⚠️ 無法辨識有效紀錄。請確認分頁第 3 行包含『販賣名』與『成分名』。")
