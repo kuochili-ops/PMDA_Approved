@@ -5,15 +5,17 @@ import re
 import time
 from urllib.parse import quote
 
-# --- 1. 片假名提取 (保持您的邏輯，但增加對括號的處理) ---
+# 版本標記：2025-12-29 11:45
+
+# --- 1. 片假名提取 (強化版本) ---
 def get_katakana_prefix(text):
     if not text or pd.isna(text): return None
-    # 移除括號內的公司資訊與換行
+    # 取第一行，移除括號與特殊符號
     text = str(text).split('\n')[0].split('（')[0].split('(')[0].strip()
     match = re.search(r'^([ァ-ヶー・]+)', text)
     return match.group(1) if match else None
 
-# --- 2. 核心檢索邏輯 (針對截圖中 [查無結果] 的修復) ---
+# --- 2. 核心檢索邏輯 (針對 [查無結果] 的物理定位優化) ---
 def get_kegg_advanced_info(jp_text, log_container, is_trade=True):
     kw = get_katakana_prefix(jp_text)
     if not kw: return None
@@ -31,7 +33,7 @@ def get_kegg_advanced_info(jp_text, log_container, is_trade=True):
         japic_match = re.search(r'japic_code=(\d+)', resp.text)
         
         if not japic_match:
-            # 備援：嘗試 Entry ID
+            # 備援：Entry ID (D編號)
             entry_match = re.search(r'/entry/(D\d+)', resp.text)
             if entry_match and not is_trade:
                 api_resp = session.get(f"https://rest.kegg.jp/get/{entry_match.group(1)}", timeout=10)
@@ -47,27 +49,27 @@ def get_kegg_advanced_info(jp_text, log_container, is_trade=True):
         med_html = session.get(med_url, headers=headers).text
 
         if not is_trade:
-            # 成分名解析 (歐文一般名)
+            # 成分名 (歐文一般名)
             ing_match = re.search(r'<th>欧文一般名</th>\s*<td>(.*?)</td>', med_html, re.S)
             return re.sub(r'<.*?>', '', ing_match.group(1)).strip() if ing_match else None
         else:
-            # 商品名解析 (關鍵修復：針對截圖中失效的路徑)
+            # 商品名 (修正點：改用更廣泛的 HTML 標籤特徵)
             prod_id_match = re.search(r'japic_med_product\?id=([\d-]+)', med_html)
             if prod_id_match:
-                prod_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={prod_id_match.group(1)}"
-                p_resp = session.get(prod_url, headers=headers).text
-                # 強化標籤抓取邏輯
-                trade_match = re.search(r'<td class="md_td_en">(.*?)</td>', p_resp, re.S)
+                p_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={prod_id_match.group(1)}"
+                p_resp = session.get(p_url, headers=headers).text
+                # 關鍵：針對 md_td_en 標籤內的任何文字進行抓取
+                trade_match = re.search(r'<td class="md_td_en">([^<]+)</td>', p_resp)
                 if trade_match:
                     return trade_match.group(1).strip()
     except: pass
     return None
 
-# --- 3. 資料清理邏輯 (採用截圖二中成功辨識的去噪比對) ---
+# --- 3. 穩定版資料清理邏輯 ---
 def clean_dataframe(df):
     header_idx = None
     for i, row in df.iterrows():
-        # 去除所有全形空格與換行後的強力比對
+        # 移除該行格子的空格、換行、全形空格後進行關鍵字比對
         row_str = "".join([re.sub(r'[\s\u3000\n]+', '', str(c)) for c in row if pd.notnull(c)])
         if '販賣名' in row_str and '成分名' in row_str:
             header_idx = i
@@ -75,11 +77,10 @@ def clean_dataframe(df):
             
     if header_idx is None: return None
     
-    # 定位標題
     df.columns = df.iloc[header_idx]
     df = df.iloc[header_idx + 1:].reset_index(drop=True)
     
-    # 欄位重新映射
+    # 欄位映射：移除名稱內的雜質
     rename_map = {}
     for col in df.columns:
         c_clean = re.sub(r'[\s\u3000\n]+', '', str(col))
@@ -88,37 +89,36 @@ def clean_dataframe(df):
         elif 'No' in c_clean: rename_map[col] = 'No.'
     
     df = df.rename(columns=rename_map)
-    
     if 'JP_Trade' in df.columns:
         df = df.dropna(subset=['JP_Trade'])
-        # 藍框邊界守護：過濾掉非數字的 No.
+        # 藍框保護：確保 No. 欄位為數字（解決 5 月份末尾雜訊）
         if 'No.' in df.columns:
             df = df[df['No.'].apply(lambda x: str(x).strip().replace('.0','').isdigit())]
         return df.reset_index(drop=True)
     return None
 
-# --- 4. Streamlit 主程式 ---
+# --- 4. Streamlit 介面 ---
 def main():
     st.set_page_config(layout="wide")
-    st.title("💊 PMDA 藥品清單翻譯 (JAPIC 深度修正版)")
+    # 抬頭加入時間戳記供您辨識
+    st.title("💊 PMDA 藥品翻譯 (更新：2025-12-29 11:45)")
 
-    up_file = st.file_uploader("上傳 Excel", type=['xlsx'])
+    up_file = st.file_uploader("上傳 PMDA Excel 檔案", type=['xlsx'])
     if up_file:
         xls = pd.ExcelFile(up_file)
-        sheet_name = st.selectbox("選擇分頁", xls.sheet_names)
-        
-        if sheet_name:
-            raw_df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
-            df = clean_dataframe(raw_df)
-            
+        sheet = st.selectbox("請選擇分頁：", xls.sheet_names)
+        if sheet:
+            raw = pd.read_excel(xls, sheet_name=sheet, header=None)
+            df = clean_dataframe(raw)
             if df is not None:
-                st.success(f"✅ 辨識成功！分頁：{sheet_name} (有效數據: {len(df)} 筆)")
-                if st.button("🚀 開始檢索翻譯"):
+                st.success(f"✅ 分頁：{sheet} (辨識成功，有效數據：{len(df)} 筆)")
+                if st.button("🚀 開始檢索 (深度修正路徑)"):
                     results = []
-                    log_area = st.empty()
-                    for _, row in df.iterrows():
-                        en_t = get_kegg_advanced_info(row['JP_Trade'], log_area, is_trade=True)
-                        en_i = get_kegg_advanced_info(row['JP_Ingredient'], log_area, is_trade=False)
+                    log = st.empty()
+                    for idx, row in df.iterrows():
+                        log.write(f"正在處理 No.{row.get('No.','')}: {row['JP_Trade'][:15]}...")
+                        en_t = get_kegg_advanced_info(row['JP_Trade'], log, True)
+                        en_i = get_kegg_advanced_info(row['JP_Ingredient'], log, False)
                         results.append({
                             "No.": row.get('No.', ''),
                             "商品名(日)": row['JP_Trade'],
@@ -128,7 +128,7 @@ def main():
                         })
                     st.dataframe(pd.DataFrame(results), use_container_width=True)
             else:
-                st.error("⚠️ 無法辨識。請確認標題列位於前 10 行內。")
+                st.error("⚠️ 仍無法辨識。請確認分頁標題列（No., 販賣名, 成分名）位於前 10 行內。")
 
 if __name__ == "__main__":
     main()
