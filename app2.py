@@ -6,90 +6,87 @@ import time
 import io
 from bs4 import BeautifulSoup
 
-# 版本標記：2025-12-29 23:45 完整修正版
+# 版本標記：2025-12-30 01:00 
 
-# --- 1. 核心抓取邏輯：定位 HTML 標籤 ---
-def fetch_by_html_tags(japic_code):
-    if not japic_code or str(japic_code).lower() in ["none", "nan", ""]: 
-        return {"trade_en": "[無ID]", "ing_en": "[無ID]"}
+def fetch_kegg_data(japic_code):
+    # 物理邏輯：檢查 ID 是否為有效 8 位數字
+    if not japic_code or str(japic_code).lower() in ["nan", "none", ""]:
+        return None
     
-    clean_code = str(japic_code).strip().zfill(8)
+    clean_code = str(japic_code).split('.')[0].strip().zfill(8)
     url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={clean_code}"
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]"}
-
+    
+    res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "url": url}
     try:
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = requests.get(url, headers=headers, timeout=10)
         resp.encoding = resp.apparent_encoding
         soup = BeautifulSoup(resp.text, 'html.parser')
 
-        # 抓取成分名 (欧文一般名)
+        # 定位：<th>欧文一般名</th> 旁的 <td>
         th_ing = soup.find('th', string=re.compile(r'欧文一般名'))
-        if th_ing and th_ing.find_next_sibling('td'):
+        if th_ing:
             res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
-        # 抓取商品名 (欧文商標名)
+        # 定位：<th>欧文商標名</th> 旁的 <td>
         th_trade = soup.find('th', string=re.compile(r'欧文商標名'))
-        if th_trade and th_trade.find_next_sibling('td'):
+        if th_trade:
             res["trade_en"] = th_trade.find_next_sibling('td').get_text(strip=True)
     except:
         pass
     return res
 
-# --- 2. Excel 欄位自動辨識邏輯 ---
-def clean_and_extract_df(df):
-    header_idx = None
-    for i in range(min(15, len(df))):
-        row_str = "".join([str(c) for c in df.iloc[i]])
-        if '商品' in row_str or '販' in row_str:
+st.set_page_config(layout="wide")
+st.title("💊 PMDA 翻譯 (精確十筆專用版)")
+
+f = st.file_uploader("上傳您的 Excel", type=['xlsx'])
+
+if f:
+    # 讀取 Excel 並自動尋找含有 'JapicID' 或 '商品名' 的那一列作為標頭
+    df_all = pd.read_excel(f, header=None)
+    
+    # 尋找標頭行
+    header_idx = 0
+    for i in range(len(df_all)):
+        row_str = "".join(df_all.iloc[i].astype(str))
+        if 'ID' in row_str.upper() or '商品' in row_str:
             header_idx = i
             break
     
-    if header_idx is not None:
-        df.columns = df.iloc[header_idx]
-        df = df.iloc[header_idx+1:].reset_index(drop=True)
+    df = df_all.iloc[header_idx:].copy()
+    df.columns = df.iloc[0]
+    df = df[1:].reset_index(drop=True)
     
-    # 清理並確保 JapicID 欄位存在
-    cols = df.columns.astype(str).tolist()
-    target_id_col = next((c for c in cols if 'ID' in c.upper() or 'JAPIC' in c.upper()), None)
-    trade_col = next((c for c in cols if '商品' in c or '販' in c), None)
-    ing_col = next((c for c in cols if '成分' in c or '成' in c), None)
-    
-    return df, target_id_col, trade_col, ing_col
-
-# --- 3. Streamlit UI ---
-st.set_page_config(layout="wide")
-st.title("💊 PMDA 翻譯 (Excel 解析 + 標籤精確版)")
-
-f = st.file_uploader("請上傳您的 Excel 檔案", type=['xlsx', 'csv'])
-
-if f:
-    raw_df = pd.read_excel(f, header=None) if f.name.endswith('.xlsx') else pd.read_csv(f, header=None)
-    df, id_col, trade_col, ing_col = clean_and_extract_df(raw_df)
+    # 找出 JapicID 欄位並移除空白行
+    id_col = next((c for c in df.columns.astype(str) if 'ID' in c.upper() or 'JAPIC' in c.upper()), None)
     
     if id_col:
-        st.success(f"✅ 辨識成功！使用欄位: [ID: {id_col}] [商品: {trade_col}] [成分: {ing_col}]")
-        st.dataframe(df.head(10))
+        # 重要：只留下真正有 JapicID 的行，避免跑出 1389 筆
+        df_valid = df[df[id_col].astype(str).str.contains(r'\d', na=False)].copy()
         
-        if st.button("🚀 開始翻譯這 10 筆資料"):
+        st.success(f"✅ 偵測到 {len(df_valid)} 筆有效藥品資料")
+        st.dataframe(df_valid.head(len(df_valid)))
+        
+        if st.button("🚀 開始翻譯"):
             results = []
             bar = st.progress(0)
+            status = st.empty()
             
-            # 僅處理前 10 筆或有效 JapicID 的資料
-            process_df = df.head(15) 
-            for i, row in process_df.iterrows():
-                code = str(row[id_col]).strip().replace('.0','')
-                if not code or code == 'nan': continue
+            for i, (idx, row) in enumerate(df_valid.iterrows()):
+                code = str(row[id_col]).strip()
+                status.text(f"⏳ 正在處理：{i+1} / {len(df_valid)} (ID: {code})")
                 
-                info = fetch_by_html_tags(code)
+                info = fetch_kegg_data(code)
+                
                 results.append({
+                    "No.": i+1,
                     "JapicID": code,
-                    "商品名(日)": row[trade_col],
-                    "Trade Name (EN)": info["trade_en"],
-                    "成分名(日)": row[ing_col],
-                    "Ingredient (EN)": info["ing_en"]
+                    "商品名(日)": row.get("商品名(日)", ""),
+                    "Trade Name (EN)": info["trade_en"] if info else "[跳過]",
+                    "成分名(日)": row.get("成分名(日)", ""),
+                    "Ingredient (EN)": info["ing_en"] if info else "[跳過]"
                 })
-                bar.progress((len(results)) / 10 if len(results)<=10 else 1.0)
+                bar.progress((i + 1) / len(df_valid))
                 time.sleep(1.2)
             
             res_df = pd.DataFrame(results)
@@ -99,6 +96,6 @@ if f:
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 res_df.to_excel(writer, index=False)
-            st.download_button("📥 下載翻譯後的 Excel", output.getvalue(), "PMDA_10_Result.xlsx")
+            st.download_button("📥 下載 Excel 結果", output.getvalue(), "PMDA_Final_Success.xlsx")
     else:
-        st.error("❌ 找不到 JapicID 欄位，請確認 Excel 內容。")
+        st.error("❌ 無法在 Excel 中找到 JapicID 欄位。")
