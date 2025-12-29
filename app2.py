@@ -7,7 +7,7 @@ from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
 
-# 版本標記：2025-12-29 21:00
+# 版本標記：2025-12-30 修正版
 
 def get_katakana_prefix(text):
     if not text or pd.isna(text): return ""
@@ -15,7 +15,7 @@ def get_katakana_prefix(text):
     match = re.search(r'([ァ-ヶー・]+)', text)
     return match.group(1) if match else ""
 
-# --- 核心邏輯：跳過搜尋，直接嘗試從 JAPIC ID 提取 (如果搜尋失敗則暴力掃描) ---
+# --- 核心邏輯：代入 JapicID 至網址並搜尋英文字串 ---
 def fetch_by_japic_logic(kw_trade, kw_ing):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -24,65 +24,64 @@ def fetch_by_japic_logic(kw_trade, kw_ing):
     res = {"trade_en": "[查無結果]", "ing_en": "[查無結果]", "target_id": "None"}
 
     try:
-        # 1. 搜尋步驟 (這是為了拿到 japic_code)
-        # 增加 Referer 偽裝成從官網進入
+        # 1. 搜尋步驟：取得 japic_code
         search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw_trade)}"
         resp_search = session.get(search_url, headers=headers, timeout=15)
         
-        # 暴力提取所有可能是 japic_code 的 8 位數字
+        # 提取 8 位數的 japic_code
         japic_codes = re.findall(r'japic_code=(\d+)', resp_search.text + resp_search.url)
         
         if japic_codes:
             japic_code = japic_codes[0]
             res["target_id"] = japic_code
             
-            # 2. 進入目標頁面
+            # 2. 核心要求：代入 japic_code 到指定網址
             target_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
             resp_med = session.get(target_url, headers=headers, timeout=15)
+            resp_med.encoding = resp_med.apparent_encoding # 確保日文編碼正確
             
-            # 使用您的「2. 禁忌」邏輯
-            # 為了避免標籤干擾，將 HTML 轉換為乾淨的換行文字
             soup = BeautifulSoup(resp_med.text, 'html.parser')
-            # 移除腳本與樣式
-            for script in soup(["script", "style"]):
+            
+            # --- 策略 A：使用「2. 禁忌」物理位置切分提取英文字串 ---
+            temp_soup = BeautifulSoup(resp_med.text, 'html.parser')
+            for script in temp_soup(["script", "style"]):
                 script.decompose()
+            full_text = temp_soup.get_text(separator="\n")
             
-            full_text = soup.get_text(separator="\n")
-            
-            # 找到「2. 禁忌」的位置並截斷
             if "2. 禁忌" in full_text:
                 pre_contra_text = full_text.split("2. 禁忌")[0]
-                
-                # 提取英文名詞 (首字母大寫，通常包含多個單字)
-                # 我們找連續的英文單字，例如 "Drospirenone" 或 "Slynd"
+                # 尋找連續英文單字 (包含空格與連字號)
                 found_names = re.findall(r'\b[A-Z][a-zA-Z\s\-]{3,}\b', pre_contra_text)
                 
-                # 去除重複並過濾 (例如排除掉 "JAPIC" 這種字眼)
                 clean_names = []
                 for n in found_names:
                     n = n.strip()
-                    if n.upper() not in ["JAPIC", "KEGG", "MEDICUS"] and len(n) > 2:
+                    if n.upper() not in ["JAPIC", "KEGG", "MEDICUS", "PDF"] and len(n) > 2:
                         if n not in clean_names:
                             clean_names.append(n)
                 
-                # 您的物理定義：第一個是成分名，第二個是商品名
-                if len(clean_names) >= 1:
-                    res["ing_en"] = clean_names[0]
-                if len(clean_names) >= 2:
-                    res["trade_en"] = clean_names[1]
+                # 規則：1.成分名 2.商品名
+                if len(clean_names) >= 1: res["ing_en"] = clean_names[0]
+                if len(clean_names) >= 2: res["trade_en"] = clean_names[1]
             
-            # 備援機制：如果禁忌邏輯沒抓到，改抓表格
-            if res["trade_en"] == "[查無結果]":
+            # --- 策略 B：若物理切分失敗，精確搜尋表格中的歐文字串 (<th>標籤定位) ---
+            if res["trade_en"] == "[查無結果]" or res["ing_en"] == "[查無結果]":
+                # 找尋「欧文商標名」
                 th_trade = soup.find('th', string=re.compile(r'欧文商標名'))
-                if th_trade: res["trade_en"] = th_trade.find_next_sibling('td').get_text(strip=True)
+                if th_trade and th_trade.find_next_sibling('td'):
+                    res["trade_en"] = th_trade.find_next_sibling('td').get_text(strip=True)
+                
+                # 找尋「欧文一般名」
                 th_ing = soup.find('th', string=re.compile(r'欧文一般名'))
-                if th_ing: res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
+                if th_ing and th_ing.find_next_sibling('td'):
+                    res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
-    except:
-        pass
+    except Exception as e:
+        res["trade_en"] = f"[錯誤: {str(e)}]"
+    
     return res
 
-# --- UI 與 檔案處理 ---
+# --- UI 與 檔案解析 (維持您的 21:00 邏輯) ---
 def clean_dataframe(df):
     header_idx = None
     cols = {}
@@ -110,7 +109,7 @@ def clean_dataframe(df):
     return pd.DataFrame(rows)
 
 st.set_page_config(layout="wide")
-st.title("💊 PMDA 翻譯 (物理定位精準版：2025-12-29 21:00)")
+st.title("💊 PMDA 翻譯 (JapicID 網址代入搜尋版)")
 
 f = st.file_uploader("上傳 Excel", type=['xlsx'])
 if f:
@@ -118,7 +117,7 @@ if f:
     if df is not None:
         st.success("✅ 檔案辨識成功")
         st.dataframe(df, use_container_width=True)
-        if st.button("🚀 開始檢索 (進入 JAPIC 頁面解析)"):
+        if st.button("🚀 開始代入 JapicID 網址並解析"):
             results = []
             bar = st.progress(0)
             log = st.empty()
@@ -127,14 +126,15 @@ if f:
                 info = fetch_by_japic_logic(r['關鍵字'], r['成分名(日)'])
                 
                 results.append({
-                    "No.": r['No.'], "商品名(日)": r['商品名(日)'],
+                    "No.": r['No.'], 
+                    "JapicID": info["target_id"],
+                    "商品名(日)": r['商品名(日)'],
                     "Trade Name (EN)": info["trade_en"],
                     "成分名(日)": r['成分名(日)'],
-                    "Ingredient (EN)": info["ing_en"],
-                    "JapicID": info["target_id"]
+                    "Ingredient (EN)": info["ing_en"]
                 })
                 bar.progress((i + 1) / len(df))
-                time.sleep(1.5) # 提高延遲確保安全性
+                time.sleep(1.2) # 延遲確保請求成功
             
             res_df = pd.DataFrame(results)
             st.dataframe(res_df, use_container_width=True)
@@ -142,4 +142,4 @@ if f:
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 res_df.to_excel(writer, index=False)
-            st.download_button("📥 下載最終結果", output.getvalue(), "PMDA_Final_Fix.xlsx")
+            st.download_button("📥 下載翻譯結果", output.getvalue(), "PMDA_KEGG_Result.xlsx")
