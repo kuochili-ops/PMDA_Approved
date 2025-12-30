@@ -7,98 +7,139 @@ from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
 
-st.set_page_config(layout="wide", page_title="PMDA Search Fixer")
+# --- 版本資訊 ---
+VERSION_DATE = "2025-12-30"
+VERSION_TIME = "21:00" 
 
-st.title("💊 PMDA 深度搜尋解析器 (修復搜尋失敗問題)")
-st.markdown("> **修正說明**：針對搜尋不到 ID 的問題，此版本強化了「藥名提取」邏輯，會自動剔除公司名、括號及法人編號。")
+st.set_page_config(layout="wide", page_title=f"PMDA Multi-Sheet Tool")
 
-def search_japic_id(full_name):
-    """深度搜尋 JapicID，具備多重回退機制"""
+st.title("💊 PMDA 跨分頁全自動解析器")
+st.markdown(f"""
+> **多分頁支援說明**：
+> 1. **自動識別**：會讀取 Excel 內所有分頁（如：承認品目5月分、6月分...）。
+> 2. **智能定位**：每個分頁都會獨立掃描標題列（No., 販売名）。
+> 3. **彙整輸出**：將所有分頁的解析結果合併導出為一個 Excel。
+""")
+st.divider()
+
+def fetch_data(japic_id_input, trade_jp_full):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None"}
     
-    # 1. 基礎清洗：移除所有括號內容、換行、以及全型空白
-    # 例如：'リブロファズ配合皮下注 (ヤンセン...)' -> 'リブロファズ配合皮下注'
-    clean_keyword = re.split(r'[\(\n\s（]', str(full_name))[0].strip()
-    
-    # 2. 進階清洗：移除常見的劑型後綴以提高命中率
-    # 例如：'ザズベイカプセル30 mg' -> 'ザズベイ'
-    short_keyword = re.sub(r'(錠|カプセル|配合|点滴|静注|皮下注|注射|顆粒|内用液|分包|\d+).*$', '', clean_keyword)
-
-    # 嘗試兩種關鍵字搜尋：先用短的（成功率高），再用乾淨的
-    for kw in [short_keyword, clean_keyword]:
-        if len(kw) < 2: continue
-        search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw)}"
-        try:
-            r = requests.get(search_url, headers=headers, timeout=10)
-            match = re.search(r'japic_code=(\d+)', r.text + r.url)
-            if match:
-                return match.group(1).zfill(8)
-        except:
-            continue
-    return None
-
-def fetch_en_details(jid):
-    """提取英文資訊邏輯 (保持您的精確提取邏輯)"""
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]"}
     try:
-        # Trade Name
-        t_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={jid}"
-        rt = requests.get(t_url, headers=headers, timeout=10)
-        rt.encoding = rt.apparent_encoding
-        t_text = BeautifulSoup(rt.text, 'html.parser').get_text(separator=" ", strip=True)
-        if "欧文商標名" in t_text:
-            after = t_text.split("欧文商標名")[-1].strip()
-            m = re.search(r'\b([A-Z][A-Za-z0-9\s\-\.\/]{2,})\b', after)
-            if m: res["trade_en"] = re.split(r'[^\x00-\x7F]+', m.group(1))[0].strip()
+        # 1. ID 清洗
+        raw_id = str(japic_id_input).split('.')[0].strip()
+        final_id = re.sub(r'[^0-9]', '', raw_id)
         
-        # Ingredient
-        i_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={jid}"
-        ri = requests.get(i_url, headers=headers, timeout=10)
-        ri.encoding = ri.apparent_encoding
-        si = BeautifulSoup(ri.text, 'html.parser')
-        th = si.find('th', string=re.compile(r'欧文一般名'))
-        if th and th.find_next_sibling('td'):
-            res["ing_en"] = th.find_next_sibling('td').get_text(strip=True)
-    except:
-        pass
+        # 2. 如果沒有 ID，則搜尋關鍵字 (清洗藥名：取第一行且移除劑型數字)
+        if not (5 <= len(final_id) <= 9):
+            search_keyword = re.split(r'[\(\n\s（]', str(trade_jp_full))[0].strip()
+            search_keyword = re.sub(r'\d+.*$', '', search_keyword)
+            
+            if len(search_keyword) >= 2:
+                search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(search_keyword)}"
+                r_s = requests.get(search_url, headers=headers, timeout=10)
+                codes = re.findall(r'japic_code=(\d+)', r_s.text + r_s.url)
+                if codes: final_id = codes[0]
+
+        if final_id:
+            final_id = final_id.zfill(8)
+            res["target_id"] = final_id
+            
+            # --- [Part A] Trade Name ---
+            t_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={final_id}"
+            rt = requests.get(t_url, headers=headers, timeout=10)
+            rt.encoding = rt.apparent_encoding
+            soup_t = BeautifulSoup(rt.text, 'html.parser')
+            t_text = soup_t.get_text(separator=" ", strip=True)
+            
+            if "欧文商標名" in t_text:
+                after_anchor = t_text.split("欧文商標名")[-1].strip()
+                t_match = re.search(r'\b([A-Z][A-Za-z0-9\s\-\.\/]{2,})\b', after_anchor)
+                if t_match:
+                    candidate = t_match.group(1).strip()
+                    res["trade_en"] = re.split(r'[^\x00-\x7F]+', candidate)[0].strip()
+
+            # --- [Part B] Ingredient ---
+            i_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}"
+            ri = requests.get(i_url, headers=headers, timeout=10)
+            ri.encoding = ri.apparent_encoding
+            si = BeautifulSoup(ri.text, 'html.parser')
+            th = si.find('th', string=re.compile(r'欧文一般名'))
+            if th and th.find_next_sibling('td'):
+                res["ing_en"] = th.find_next_sibling('td').get_text(strip=True)
+
+    except Exception:
+        res["trade_en"] = "[解析錯誤]"
     return res
 
-# --- 介面邏輯 ---
-f = st.file_uploader("上傳含有 [未檢出] 的 Excel", type=['xlsx'])
+# --- 檔案上傳與處理 ---
+f = st.file_uploader("請上傳包含多個分頁的『承認品目』Excel", type=['xlsx'])
 
 if f:
     xl = pd.ExcelFile(f)
-    for s_name in xl.sheet_names:
-        df = pd.read_excel(f, sheet_name=s_name)
-        # 尋找「日文販賣名」這一欄
-        target_col = next((c for c in df.columns if '販' in str(c) or '名' in str(c)), None)
+    sheet_names = xl.sheet_names
+    st.info(f"偵測到分頁： {', '.join(sheet_names)}")
+    
+    if st.button("🚀 開始解析所有分頁"):
+        all_final_results = []
         
-        if target_col and st.button(f"開始修復分頁：{s_name}"):
-            results = []
-            bar = st.progress(0)
-            rows = df.to_dict('records')
+        for s_name in sheet_names:
+            st.write(f"正在掃描分頁：**{s_name}**...")
+            raw_df = pd.read_excel(f, sheet_name=s_name, header=None)
             
-            for i, row in enumerate(rows):
-                raw_name = str(row[target_col])
-                jid = search_japic_id(raw_name)
-                
-                if jid:
-                    info = fetch_en_details(jid)
-                    row['JapicID'] = jid
-                    row['Trade Name (EN)'] = info['trade_en']
-                    row['Ingredient (EN)'] = info['ing_en']
-                else:
-                    row['JapicID'] = "[仍未找到]"
-                
-                results.append(row)
-                bar.progress((i + 1) / len(rows))
-                time.sleep(0.6)
+            # 1. 定位標題列
+            h_idx = -1
+            cols = {'No': -1, 'Trade': -1, 'ID': -1}
+            for i in range(min(15, len(raw_df))):
+                r_str = "".join([str(x) for x in raw_df.iloc[i]])
+                if any(k in r_str for k in ['販', '商', 'No']):
+                    h_idx = i
+                    for idx, val in enumerate(raw_df.iloc[i]):
+                        v = str(val).replace(' ', '').replace('\n', '')
+                        if 'No' in v: cols['No'] = idx
+                        if '販' in v or '商' in v: cols['Trade'] = idx
+                        if 'ID' in v or 'Japic' in v: cols['ID'] = idx
+                    break
             
-            new_df = pd.DataFrame(results)
-            st.dataframe(new_df)
+            if h_idx == -1 or cols['Trade'] == -1:
+                st.warning(f"分頁 '{s_name}' 找不到有效欄位，跳過。")
+                continue
+
+            # 2. 逐行處理數據
+            current_sheet_data = []
+            rows = raw_df.iloc[h_idx + 1:]
+            for _, row in rows.iterrows():
+                # 確保 No. 是數字
+                no_val = str(row.iloc[cols['No']]).strip().split('.')[0] if cols['No'] != -1 else ""
+                if not no_val.isdigit(): continue
+                
+                trade_jp = str(row.iloc[cols['Trade']]).strip()
+                jid_val = str(row.iloc[cols['ID']]).strip() if cols['ID'] != -1 else ""
+                
+                # 執行 API 抓取
+                info = fetch_data(jid_val, trade_jp)
+                
+                all_final_results.append({
+                    "來源分頁": s_name,
+                    "No.": no_val,
+                    "日文販賣名": trade_jp.replace('\n', ' '),
+                    "JapicID": info["target_id"],
+                    "Trade Name (EN)": info["trade_en"],
+                    "Ingredient (EN)": info["ing_en"],
+                    "網址": f"https://www.kegg.jp/medicus-bin/japic_med_product?id={info['target_id']}" if info['target_id'] != "None" else ""
+                })
+                time.sleep(0.5) # 防止請求過快
+
+        # 3. 顯示結果與下載
+        if all_final_results:
+            res_df = pd.DataFrame(all_final_results)
+            st.subheader("📊 跨分頁彙整結果")
+            st.dataframe(res_df, use_container_width=True)
             
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
-                new_df.to_excel(writer, index=False)
-            st.download_button("📥 下載修復後的 Excel", out.getvalue(), f"Fixed_{s_name}.xlsx")
+                res_df.to_excel(writer, index=False, sheet_name='Summary')
+            st.download_button("📥 下載完整彙整 Excel", out.getvalue(), "PMDA_All_Sheets_Result.xlsx")
+        else:
+            st.error("未成功提取任何數據。")
