@@ -7,7 +7,7 @@ from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
 
-# --- Azure 翻譯設定 (請填入您的金鑰) ---
+# --- Azure 翻譯設定 (請務必填寫) ---
 AZURE_KEY = "您的_Azure_Key"
 AZURE_ENDPOINT = "https://api.cognitive.microsofttranslator.com/"
 AZURE_REGION = "您的區域"
@@ -29,27 +29,27 @@ def fetch_data_by_katakana(trade_jp_full):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None"}
     
-    # --- 核心邏輯：提取片假名關鍵字 ---
-    # 1. 先切掉換行與括號公司名
-    clean_name = re.split(r'[\(\n\s（]', str(trade_jp_full))[0].strip()
-    # 2. 正則提取開頭連續的片假名 (含長音符 ─ 和中點 ・)
-    katakana_match = re.match(r'^[\u30A0-\u30FF\u30FB\u30FC]+', clean_name)
-    search_keyword = katakana_match.group(0) if katakana_match else clean_name
+    # --- 關鍵修正：只提取開頭的片假名 ---
+    # 去除換行與括號內容
+    raw_clean = re.split(r'[\(\n\s（]', str(trade_jp_full))[0].strip()
+    # 使用 Regex 抓取開頭連續的片假名 (含長音 ─ 和點 ・)
+    katakana_match = re.match(r'^[\u30A0-\u30FF\u30FB\u30FC]+', raw_clean)
+    search_keyword = katakana_match.group(0) if katakana_match else raw_clean
     
     if len(search_keyword) < 2: return res
 
     try:
-        # 搜尋 JapicID
+        # 第一步：搜尋 JapicID
         search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(search_keyword)}"
         r_s = requests.get(search_url, headers=headers, timeout=10)
         codes = re.findall(r'japic_code=(\d+)', r_s.text + r_s.url)
         
         if codes:
-            final_id = codes[0].zfill(8)
-            res["target_id"] = final_id
+            jid = codes[0].zfill(8)
+            res["target_id"] = jid
             
-            # A. 抓 Trade Name (EN)
-            rt = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med_product?id={final_id}", headers=headers)
+            # 第二步：抓 Trade Name (EN) - 進入 Product 頁
+            rt = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med_product?id={jid}", headers=headers)
             rt.encoding = rt.apparent_encoding
             t_text = BeautifulSoup(rt.text, 'html.parser').get_text(separator=" ", strip=True)
             if "欧文商標名" in t_text:
@@ -57,8 +57,8 @@ def fetch_data_by_katakana(trade_jp_full):
                 m = re.search(r'\b([A-Z][A-Za-z0-9\s\-\.\/]{2,})\b', after)
                 if m: res["trade_en"] = re.split(r'[^\x00-\x7F]+', m.group(1))[0].strip()
 
-            # B. 抓 Ingredient (EN)
-            ri = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}", headers=headers)
+            # 第三步：抓 Ingredient (EN) - 進入 Med 頁
+            ri = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={jid}", headers=headers)
             ri.encoding = ri.apparent_encoding
             si = BeautifulSoup(ri.text, 'html.parser')
             th = si.find('th', string=re.compile(r'欧文一般名'))
@@ -67,60 +67,69 @@ def fetch_data_by_katakana(trade_jp_full):
     except: pass
     return res
 
-st.title("🧪 PMDA 12月專用：片假名精準搜尋 + Azure 翻譯")
+st.title("🧪 PMDA 12月專用解析器 (片假名提取 + Azure 翻譯)")
 
-f = st.file_uploader("上傳 12 月 Excel", type=['xlsx'])
+f = st.file_uploader("請上傳您的原始 Excel (xlsx)", type=['xlsx'])
+
 if f:
     xl = pd.ExcelFile(f)
-    sheet_name = st.selectbox("選擇分頁", xl.sheet_names, index=len(xl.sheet_names)-1)
+    s_names = xl.sheet_names
+    # 強制顯示所有分頁，方便您點選「承認品目12月分」
+    selected_sheet = st.selectbox("請手動選擇 12 月的分頁：", s_names, index=len(s_names)-1)
     
-    if st.button("🚀 執行精準解析"):
-        df = pd.read_excel(f, sheet_name=sheet_name, header=None)
+    if st.button("🚀 開始針對 12 月執行精準解析"):
+        df_raw = pd.read_excel(f, sheet_name=selected_sheet, header=None)
         
-        # 尋找 販賣名(t_col)、No(n_col)、效能效果(ind_col)
+        # 動態定位欄位
         h_idx, t_col, n_col, ind_col = -1, -1, -1, -1
-        for i in range(min(15, len(df))):
-            row_vals = [str(x) for x in df.iloc[i]]
-            if any('販' in x for x in row_vals):
+        for i in range(min(20, len(df_raw))):
+            row_str = [str(x) for x in df_raw.iloc[i]]
+            if any('販' in x for x in row_str):
                 h_idx = i
-                for idx, v in enumerate(row_vals):
+                for idx, v in enumerate(row_str):
                     if '販' in v: t_col = idx
                     if 'No' in v: n_col = idx
                     if '効' in v or '效果' in v: ind_col = idx
                 break
 
         if h_idx != -1:
-            rows = df.iloc[h_idx+1:].dropna(subset=[t_col])
+            # 濾掉沒有販賣名的行
+            valid_rows = df_raw.iloc[h_idx+1:].dropna(subset=[t_col])
             results = []
             bar = st.progress(0)
             
-            for i, (idx, row) in enumerate(rows.iterrows()):
-                no_val = str(row.iloc[n_col]).split('.')[0] if n_col != -1 else ""
-                if not no_val.isdigit(): continue
+            for i, (idx, row) in enumerate(valid_rows.iterrows()):
+                # 只處理 No. 是數字的行
+                no_str = str(row.iloc[n_col]).split('.')[0] if n_col != -1 else ""
+                if not no_str.isdigit(): continue
                 
                 jp_name = str(row.iloc[t_col]).strip()
-                # 執行「片假名優先」抓取
+                # 執行「片假名核心」搜尋
                 info = fetch_data_by_katakana(jp_name)
                 
-                # 翻譯適應症
+                # 執行 Azure 翻譯
                 jp_ind = str(row.iloc[ind_col]).strip() if ind_col != -1 else ""
                 en_ind = translate_to_en(jp_ind)
                 
                 results.append({
-                    "No.": no_val,
+                    "No.": no_str,
                     "日文販賣名": jp_name.replace('\n', ' '),
                     "JapicID": info["target_id"],
                     "Trade Name (EN)": info["trade_en"],
                     "Ingredient (EN)": info["ing_en"],
-                    "Indication (EN)": en_ind
+                    "Indication (EN)": en_ind,
+                    "適應症原文": jp_ind
                 })
-                bar.progress((i+1)/len(rows))
-                time.sleep(0.5)
+                bar.progress((i+1)/len(valid_rows))
+                time.sleep(0.6) # 穩定連線
             
-            res_df = pd.DataFrame(results)
-            st.dataframe(res_df)
+            final_df = pd.DataFrame(results)
+            st.subheader(f"✅ {selected_sheet} 解析完成")
+            st.dataframe(final_df)
             
-            out = io.BytesIO()
-            with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
-                res_df.to_excel(writer, index=False)
-            st.download_button("📥 下載解析結果", out.getvalue(), "PMDA_Dec_Katakana_Azure.xlsx")
+            output = io.BytesIO()
+            with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
+                final_df.to_excel(writer, index=False)
+            st.download_button("📥 下載 12 月翻譯修復版", output.getvalue(), f"PMDA_Dec_Katakana_{int(time.time())}.xlsx")
+        else:
+            st.error("無法在該分頁中定位到『販売名』欄位，請確認分頁內容。")
