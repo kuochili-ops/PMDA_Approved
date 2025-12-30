@@ -7,7 +7,7 @@ from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
 
-# 版本標記：2025-12-30 商品名精確定位版
+# 版本標記：2025-12-30 來源網址註記版
 
 def get_katakana_prefix(text):
     if not text or pd.isna(text): return ""
@@ -15,13 +15,14 @@ def get_katakana_prefix(text):
     match = re.search(r'([ァ-ヶー・]+)', text)
     return match.group(1) if match else ""
 
-# --- 核心邏輯：針對「規制区分」定位商品名 ---
+# --- 核心邏輯：針對「規制区分」定位商品名，並記錄網址 ---
 def fetch_by_japic_logic(kw_trade, kw_ing):
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     }
     session = requests.Session()
-    res = {"trade_en": "[查無結果]", "ing_en": "[查無結果]", "target_id": "None"}
+    # 新增 source_url 欄位用於記錄
+    res = {"trade_en": "[查無結果]", "ing_en": "[查無結果]", "target_id": "None", "source_url": "N/A"}
 
     try:
         # 1. 搜尋步驟：取得 japic_code
@@ -32,7 +33,10 @@ def fetch_by_japic_logic(kw_trade, kw_ing):
         if japic_codes:
             japic_code = japic_codes[0]
             res["target_id"] = japic_code
+            # 設定最終存取的網頁網址
             target_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={japic_code}"
+            res["source_url"] = target_url
+            
             resp_med = session.get(target_url, headers=headers, timeout=15)
             resp_med.encoding = resp_med.apparent_encoding
             
@@ -44,18 +48,16 @@ def fetch_by_japic_logic(kw_trade, kw_ing):
                 res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
             # --- B. 抓取商品名 (定位：規制区分 之後的 td) ---
-            # 優先使用 HTML Tag 定位 (您提到的 <th>規制区分</th> 之後的 <td>)
             th_reg = soup.find('th', string=re.compile(r'規制区分'))
             if th_reg:
                 td_reg = th_reg.find_next_sibling('td')
                 if td_reg:
-                    # 取得內容並清理，只保留英文字串部分 (過濾掉日文劑型干擾)
                     raw_trade = td_reg.get_text(strip=True)
-                    # 提取最後一段英文 (通常是 商品名 tablets/capsules)
+                    # 提取最後一段英文 (針對 商品名 tablets/capsules 等結構優化)
                     en_match = re.search(r'[A-Z][A-Z0-9\s\-]+(?:tablets|capsules|injection|pills)?', raw_trade, re.IGNORECASE)
                     res["trade_en"] = en_match.group(0).strip() if en_match else raw_trade
 
-            # 備援：如果上方沒抓到，嘗試「欧文商標名」標籤
+            # 備援：若無則嘗試「欧文商標名」
             if res["trade_en"] == "[查無結果]":
                 th_trade = soup.find('th', string=re.compile(r'欧文商標名'))
                 if th_trade and th_trade.find_next_sibling('td'):
@@ -66,7 +68,7 @@ def fetch_by_japic_logic(kw_trade, kw_ing):
     
     return res
 
-# --- UI 與 檔案解析 (維持原樣) ---
+# --- UI 與 檔案解析邏輯 ---
 def clean_dataframe(df):
     header_idx = None
     cols = {}
@@ -95,7 +97,12 @@ def clean_dataframe(df):
     return pd.DataFrame(rows)
 
 st.set_page_config(layout="wide")
-st.title("💊 PMDA 翻譯 (規制区分精確定位版)")
+st.title("💊 PMDA 翻譯 (含來源網址註記版)")
+st.markdown("""
+**抓取註記：**
+- **商品名 (Trade Name)**：從目標網頁的 `<th>規制区分</th>` 標籤後方單元格提取。
+- **成分名 (Ingredient)**：從目標網頁的 `<th>欧文一般名</th>` 標籤後方單元格提取。
+""")
 
 f = st.file_uploader("上傳 Excel", type=['xlsx'])
 if f:
@@ -103,7 +110,7 @@ if f:
     if df is not None:
         st.success("✅ 檔案辨識成功")
         st.dataframe(df, use_container_width=True)
-        if st.button("🚀 開始解析"):
+        if st.button("🚀 開始解析並記錄來源"):
             results = []
             bar = st.progress(0)
             log = st.empty()
@@ -117,15 +124,17 @@ if f:
                     "商品名(日)": r['商品名(日)'],
                     "Trade Name (EN)": info["trade_en"],
                     "成分名(日)": r['成分名(日)'],
-                    "Ingredient (EN)": info["ing_en"]
+                    "Ingredient (EN)": info["ing_en"],
+                    "來源網頁網址": info["source_url"]  # 這裡會顯示具體的 Japic ID 網址
                 })
                 bar.progress((i + 1) / len(df))
                 time.sleep(1.2)
             
             res_df = pd.DataFrame(results)
+            st.subheader("📊 解析結果")
             st.dataframe(res_df, use_container_width=True)
             
             output = io.BytesIO()
             with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
                 res_df.to_excel(writer, index=False)
-            st.download_button("📥 下載結果", output.getvalue(), "PMDA_Regulatory_Fixed.xlsx")
+            st.download_button("📥 下載結果 (含網址)", output.getvalue(), "PMDA_Regulatory_With_URL.xlsx")
