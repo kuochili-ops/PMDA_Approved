@@ -6,10 +6,13 @@ import time
 from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
+from datetime import datetime
 
-# 版本標記：2025-12-30 14:30 標籤對位容錯強化版
+# --- 版本資訊 ---
+VERSION_DATE = "2025-12-30"
+VERSION_TIME = "22:15" # 台北時間
 
-st.set_page_config(layout="wide", page_title="PMDA 解析工具")
+st.set_page_config(layout="wide", page_title=f"PMDA Tool {VERSION_DATE}")
 
 def get_pure_katakana(text):
     if not text or pd.isna(text): return ""
@@ -22,6 +25,7 @@ def fetch_dual_strings(japic_id_input, kw_trade):
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None", "url": "N/A", "raw_reg_text": ""}
     
     try:
+        # 1. ID 處理與搜尋
         final_id = re.sub(r'[^0-9]', '', str(japic_id_input))
         if not (final_id and len(final_id) >= 5):
             search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw_trade)}"
@@ -37,25 +41,30 @@ def fetch_dual_strings(japic_id_input, kw_trade):
             resp.encoding = resp.apparent_encoding
             soup = BeautifulSoup(resp.text, 'html.parser')
 
-            # --- 1. 成分名定位 (模糊匹配) ---
+            # --- 2. 成分名定位 (歐文一般名) ---
             th_ing = soup.find('th', string=re.compile(r'欧文.*一般名'))
             if th_ing and th_ing.find_next_sibling('td'):
                 res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
-            # --- 2. 商品名定位 (多重備援) ---
-            # 依序尋找「規制区分」、「販売名」、「商標名」
-            target_th = soup.find('th', string=re.compile(r'規制.*区分|販売.*名|商標.*名'))
+            # --- 3. 商品名定位 (強化模糊匹配) ---
+            # 針對 Scemblix 等案例，擴大搜尋範圍：不只找 th，也找文字包含「規制」或「販売」的區域
+            # 使用 lambda 函數進行更靈活的標籤過濾
+            target_td = None
+            th_tags = soup.find_all('th')
+            for th in th_tags:
+                txt = th.get_text()
+                if '規制' in txt or '区分' in txt or '販売名' in txt:
+                    target_td = th.find_next_sibling('td')
+                    if target_td: break
             
-            if target_th and target_th.find_next_sibling('td'):
-                td_node = target_th.find_next_sibling('td')
-                raw_text = td_node.get_text(separator=" ", strip=True)
+            if target_td:
+                raw_text = target_td.get_text(separator=" ", strip=True)
                 res["raw_reg_text"] = raw_text
                 
-                # 抓取邏輯：抓取日文後面的英文部分 (包含空格與連字號)
-                # 專門對應：セムブリックス錠20mg SCEMBLIX tablets
-                en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{2,}\b', raw_text)
+                # 抓取最後一段英文 (Trade Name)
+                # 規則：大寫開頭，允許空格、連字號、點
+                en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{3,}\b', raw_text)
                 if en_matches:
-                    # 取最後一組符合的英文（通常是 Trade Name）
                     res["trade_en"] = en_matches[-1].strip()
                         
     except Exception:
@@ -65,14 +74,15 @@ def fetch_dual_strings(japic_id_input, kw_trade):
 
 # --- UI 介面 ---
 st.title("💊 PMDA 雙英文字串精確對位版")
+st.caption(f"🚀 最後更新日期：{VERSION_DATE} | 時間：{VERSION_TIME}")
+st.divider()
 
-f = st.file_uploader("1. 請上傳 Excel", type=['xlsx'])
+f = st.file_uploader("1. 請上傳包含 JapicID 或商品名的 Excel", type=['xlsx'])
 
 if f:
     try:
         raw_df = pd.read_excel(f, header=None)
         header_idx, cols = None, {}
-        # 尋找表頭
         for i in range(min(20, len(raw_df))):
             row_vals = [str(x) for x in raw_df.iloc[i]]
             if any(k in "".join(row_vals) for k in ['商', '成', '販']):
@@ -109,8 +119,10 @@ if f:
             if st.button("🚀 開始深度解析"):
                 results = []
                 bar = st.progress(0)
+                status = st.empty()
+                
                 for i, r in df.iterrows():
-                    # 執行抓取
+                    status.text(f"⏳ 正在處理 No.{r['No.']}：{r['關鍵字(片假名)']}...")
                     input_id = r['JapicID'] if r['JapicID'] != "[待搜尋]" else ""
                     info = fetch_dual_strings(input_id, r['關鍵字(片假名)'])
                     
@@ -134,8 +146,10 @@ if f:
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     res_df.to_excel(writer, index=False)
-                st.download_button("📥 下載 Excel", out.getvalue(), "PMDA_Deep_Report.xlsx")
+                st.download_button("📥 下載 Excel", out.getvalue(), f"PMDA_Report_{VERSION_DATE}.xlsx")
         else:
             st.error("❌ 找不到表頭。")
     except Exception as e:
         st.error(f"錯誤: {e}")
+else:
+    st.info("請上傳 Excel 檔案以開始。")
