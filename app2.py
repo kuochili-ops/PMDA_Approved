@@ -9,16 +9,15 @@ from bs4 import BeautifulSoup
 
 # --- 版本資訊 ---
 VERSION_DATE = "2025-12-30"
-VERSION_TIME = "17:30" 
+VERSION_TIME = "18:20" 
 
 st.set_page_config(layout="wide", page_title=f"PMDA Tool {VERSION_DATE}")
 
 st.title("💊 PMDA 雙網址精確解析版")
 st.markdown(f"""
-> **解析邏輯說明**：
-> 1. **Trade Name (EN)**：由 `japic_med_product?id=` 網址獲取。
-> 2. **Ingredient (EN)**：由 `japic_med?japic_code=` 網址獲取。
-> 3. **關鍵修正**：解決 `欧文商標名` 標籤與文字分離導致抓取失敗的問題。
+> **解析策略更新**：
+> 1. **Trade Name**：鎖定 `japic_med_product` 頁面，採用「標籤後繼文字流」掃描。
+> 2. **Ingredient**：鎖定 `japic_med` 頁面，提取 `欧文一般名` 儲存格。
 """)
 st.divider()
 
@@ -27,54 +26,51 @@ def fetch_data(japic_id_input, trade_jp_full):
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None"}
     
     try:
-        # 1. ID 清洗 (確保 8 位純數字)
+        # ID 清洗
         raw_id = str(japic_id_input).split('.')[0].strip()
-        final_id = re.sub(r'[^0-9]', '', raw_id)
+        final_id = re.sub(r'[^0-9]', '', raw_id).zfill(8)
+        res["target_id"] = final_id
         
-        if not (5 <= len(final_id) <= 9):
-            # 備援：搜尋 ID
-            search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(trade_jp_full[:8])}"
-            r_s = requests.get(search_url, headers=headers, timeout=10)
-            codes = re.findall(r'japic_code=(\d+)', r_s.text + r_s.url)
-            if codes: final_id = codes[0]
+        # --- [Part A] 抓 Trade Name (產品情報頁) ---
+        t_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={final_id}"
+        rt = requests.get(t_url, headers=headers, timeout=10)
+        rt.encoding = rt.apparent_encoding
+        soup_t = BeautifulSoup(rt.text, 'html.parser')
+        
+        # 尋找包含「欧文商標名」的元素
+        anchor = soup_t.find(string=re.compile(r'欧文商標名'))
+        if anchor:
+            # 取得該元素父層之後的所有文字
+            parent = anchor.find_parent()
+            # 獲取 parent 內部所有文字並移除標籤干擾
+            full_txt = parent.get_text(separator=" ", strip=True)
+            # 使用正則：匹配「欧文商標名」後方第一個英文字串 (允許空格、橫線、點)
+            match = re.search(r'欧文商標名\s*([A-Za-z0-9][A-Za-z0-9\s\-\.\/]{3,})', full_txt)
+            if match:
+                res["trade_en"] = match.group(1).strip()
+            else:
+                # 備援：若 regex 失敗，抓取 parent 之後的下一個兄弟節點文字
+                res["trade_en"] = parent.get_text(strip=True).replace("欧文商標名", "").strip()
 
-        if final_id:
-            final_id = final_id.zfill(8)
-            res["target_id"] = final_id
-            
-            # --- [Part A] 抓商品名 (Trade Name) ---
-            t_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={final_id}"
-            rt = requests.get(t_url, headers=headers, timeout=10)
-            rt.encoding = rt.apparent_encoding
-            # 使用文字流匹配，無視標籤
-            t_text = BeautifulSoup(rt.text, 'html.parser').get_text(separator=" ", strip=True)
-            # 尋找「欧文商標名」後方 100 字元內的英文字
-            t_match = re.search(r'欧文商標名\s*([A-Z0-9][A-Za-z0-9\s\-\.\/]{3,})', t_text)
-            if t_match:
-                # 清洗抓到的字串，遇到下一個日文字就截斷
-                raw_en = t_match.group(1).strip()
-                res["trade_en"] = re.split(r'[^\x00-\x7F]+', raw_en)[0].strip()
-
-            # --- [Part B] 抓成分名 (Ingredient) ---
-            i_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}"
-            ri = requests.get(i_url, headers=headers, timeout=10)
-            ri.encoding = ri.apparent_encoding
-            si = BeautifulSoup(ri.text, 'html.parser')
-            th = si.find('th', string=re.compile(r'欧文一般名'))
-            if th and th.find_next_sibling('td'):
-                res["ing_en"] = th.find_next_sibling('td').get_text(strip=True)
+        # --- [Part B] 抓 Ingredient (醫療主頁) ---
+        i_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}"
+        ri = requests.get(i_url, headers=headers, timeout=10)
+        ri.encoding = ri.apparent_encoding
+        soup_i = BeautifulSoup(ri.text, 'html.parser')
+        th = soup_i.find('th', string=re.compile(r'欧文一般名'))
+        if th and th.find_next_sibling('td'):
+            res["ing_en"] = th.find_next_sibling('td').get_text(strip=True)
 
     except Exception:
-        res["trade_en"] = "[解析錯誤]"
+        pass
         
     return res
 
-# --- UI 介面 ---
-f = st.file_uploader("上傳 Excel", type=['xlsx'])
+# --- 主程式 ---
+f = st.file_uploader("1. 上傳 Excel", type=['xlsx'])
 
 if f:
     raw_df = pd.read_excel(f, header=None)
-    # 掃描表頭
     h_idx, cols = 0, {'No': 0, 'Trade': 1, 'ID': 2}
     for i in range(min(20, len(raw_df))):
         r_str = "".join([str(x) for x in raw_df.iloc[i]])
@@ -97,10 +93,10 @@ if f:
             "JapicID": str(row.iloc[cols['ID']]).strip()
         })
 
-    st.subheader("📋 待處理預覽")
+    st.subheader("📋 預覽清單")
     st.dataframe(pd.DataFrame(data_list))
 
-    if st.button("🚀 開始同步解析 (雙網址代入)"):
+    if st.button("🚀 開始深度解析 (文字流掃描版)"):
         results = []
         bar = st.progress(0)
         for i, r in enumerate(data_list):
@@ -109,18 +105,16 @@ if f:
                 "No.": r['No.'],
                 "JapicID": info["target_id"],
                 "Trade Name (EN)": info["trade_en"],
-                "Ingredient (EN)": info["ing_en"],
-                "Trade_URL": f"https://www.kegg.jp/medicus-bin/japic_med_product?id={info['target_id']}",
-                "Ing_URL": f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={info['target_id']}"
+                "Ingredient (EN)": info["ing_en"]
             })
             bar.progress((i + 1) / len(data_list))
             time.sleep(0.5)
         
         res_df = pd.DataFrame(results)
-        st.subheader("📊 最終解析結果")
+        st.subheader("📊 解析結果")
         st.dataframe(res_df)
         
         out = io.BytesIO()
         with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
             res_df.to_excel(writer, index=False)
-        st.download_button("📥 下載 Excel 成果", out.getvalue(), "PMDA_DualLink_Result.xlsx")
+        st.download_button("📥 下載成果", out.getvalue(), "PMDA_DeepScan_Result.xlsx")
