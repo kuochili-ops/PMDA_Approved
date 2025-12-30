@@ -9,14 +9,14 @@ from bs4 import BeautifulSoup
 
 # --- 版本資訊 ---
 VERSION_DATE = "2025-12-30"
-VERSION_TIME = "16:00" 
+VERSION_TIME = "23:50" 
 
 st.set_page_config(layout="wide", page_title=f"PMDA Tool {VERSION_DATE}")
 
 st.title("💊 PMDA 雙英文字串精確對位版")
 st.markdown(f"""
 > **版本更新紀錄** > 📅 更新日期：`{VERSION_DATE}` | ⏰ 更新時間：`{VERSION_TIME}`  
-> 🛠️ **修正重點**：回歸醫療用主頁面，使用「全字串後向匹配」，專攻 Scemblix 等難抓欄位。
+> 🛠️ **修正重點**：強制修正 JapicID 浮點數錯誤 (解決網頁錯誤)、鎖定 `japic_med_product` 頁面物理路徑。
 """)
 st.divider()
 
@@ -31,62 +31,64 @@ def fetch_dual_strings(japic_id_input, kw_trade):
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None", "url": "N/A"}
     
     try:
-        final_id = re.sub(r'[^0-9]', '', str(japic_id_input))
-        if not (final_id and 5 <= len(final_id) <= 10):
+        # 1. 精確處理 JapicID (防止出現 71700.0 這種錯誤)
+        if pd.isna(japic_id_input) or str(japic_id_input).lower() in ['none', 'nan', '']:
+            final_id = ""
+        else:
+            # 只取數字，並轉為整數再轉字串，確保沒有小數點
+            temp_id = re.sub(r'[^0-9]', '', str(japic_id_input).split('.')[0])
+            final_id = temp_id.zfill(8) if temp_id else ""
+
+        # 如果 ID 不合法，啟動關鍵字搜尋獲取 ID
+        if not (final_id and len(final_id) >= 5):
             search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw_trade)}"
             r_s = requests.get(search_url, headers=headers, timeout=10)
             codes = re.findall(r'japic_code=(\d+)', r_s.text + r_s.url)
             if codes: final_id = codes[0].zfill(8)
 
         if final_id:
-            target_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}"
+            # 優先前往您推薦的產品情報頁 (id=XXXXXXXX)
+            target_url = f"https://www.kegg.jp/medicus-bin/japic_med_product?id={final_id}"
             res["target_id"], res["url"] = final_id, target_url
             
             resp = requests.get(target_url, headers=headers, timeout=15)
             resp.encoding = resp.apparent_encoding
             soup = BeautifulSoup(resp.text, 'html.parser')
 
-            # --- [策略 1] 抓成分 (歐文一般名) ---
-            th_ing = soup.find('th', string=re.compile(r'欧文.*一般名'))
+            # --- [位置 A] Trade Name (物理路徑模式) ---
+            # 尋找包含商品名稱的 <p> 標籤
+            # 邏輯：在 body 內找第一個包含大寫英文且字數較少的 <p>
+            all_ps = soup.find_all('p')
+            for p in all_ps:
+                p_text = p.get_text(strip=True)
+                # 如果包含日文關鍵字，提取其中的大寫英文字
+                if kw_trade in p_text:
+                    en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{4,}\b', p_text)
+                    if en_matches:
+                        res["trade_en"] = en_matches[0].strip()
+                        break
+            
+            # --- [位置 B] 成分名 (去醫療頁面抓比較穩) ---
+            med_url = f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={final_id}"
+            r_med = requests.get(med_url, headers=headers, timeout=10)
+            s_med = BeautifulSoup(r_med.text, 'html.parser')
+            th_ing = s_med.find('th', string=re.compile(r'欧文.*一般名'))
             if th_ing:
                 res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
-            # --- [策略 2] 暴力掃描 Trade Name ---
-            # 將整頁轉為純文字，移除多餘空白
-            full_text = soup.get_text(separator=" ", strip=True)
-            
-            # 尋找「日文關鍵字」後面的 150 個字元
-            search_pattern = re.escape(kw_trade) + r"(.{1,150})"
-            match = re.search(search_pattern, full_text)
-            
-            if match:
-                context = match.group(1)
-                # 從這段文字中提取「連續大寫字母開頭的英文字」
-                # 排除常見的日文字、單位(mg)等
-                en_candidates = re.findall(r'\b[A-Z][A-Za-z\s\-\.]{4,}\b', context)
-                if en_candidates:
-                    # 篩選掉長得像成分名的 (如果已經抓到成分名了)
-                    for candidate in en_candidates:
-                        cand_clean = candidate.strip()
-                        if len(cand_clean) > 3 and cand_clean.lower() not in res["ing_en"].lower():
-                            res["trade_en"] = cand_clean
-                            break
-
-    except Exception:
-        res["trade_en"] = "[解析異常]"
+    except Exception as e:
+        res["trade_en"] = f"[異常: {str(e)[:10]}]"
         
     return res
 
 # --- 主程式 ---
-f = st.file_uploader("上傳 Excel", type=['xlsx'])
+f = st.file_uploader("1. 請上傳包含 JapicID 的 Excel", type=['xlsx'])
 
 if f:
     try:
-        # 讀取 Excel 且不設 header，手動掃描表頭
         raw_df = pd.read_excel(f, header=None)
-        header_row = 0
-        cols = {'No': 0, 'Trade': 1, 'Ing': 2, 'ID': 3}
-        
+        # 自動尋找表頭
+        header_row, cols = 0, {'No': 0, 'Trade': 1, 'Ing': 2, 'ID': 3}
         for i in range(min(20, len(raw_df))):
             row_str = "".join([str(x) for x in raw_df.iloc[i]])
             if any(k in row_str for k in ['商', '販', '成']):
@@ -101,33 +103,28 @@ if f:
 
         data_rows = []
         for _, row in raw_df.iloc[header_row + 1:].iterrows():
-            no_val = str(row.iloc[cols['No']]).strip().replace('.0','')
+            no_val = str(row.iloc[cols['No']]).strip().split('.')[0]
             if not no_val.isdigit() and len(data_rows) > 0: break
             
             trade_jp = str(row.iloc[cols['Trade']]).strip()
-            # JapicID 修正邏輯
-            id_raw = str(row.iloc[cols['ID']]).strip()
-            if len(re.findall(r'[0-9]', id_raw)) < 5: 
-                id_clean = "[待搜尋]"
-            else:
-                id_clean = re.sub(r'[^0-9]', '', id_raw)[:8]
-
+            # 強制將 JapicID 轉為純數字字串，避免 .0 錯誤
+            raw_id = str(row.iloc[cols['ID']]).strip()
+            id_clean = re.sub(r'[^0-9]', '', raw_id.split('.')[0])
+            
             data_rows.append({
                 "No.": no_val,
                 "商品名(日)": trade_jp,
                 "關鍵字": get_pure_katakana(trade_jp),
-                "JapicID": id_clean,
-                "成分(日)": str(row.iloc[cols['Ing']]).strip()
+                "JapicID": id_clean if len(id_clean) >= 5 else "[待搜尋]"
             })
 
-        df = pd.DataFrame(data_rows)
-        st.subheader("📋 待處理預覽")
-        st.dataframe(df)
+        st.subheader("📋 1. 待處理清單 (已修正 ID 格式)")
+        st.dataframe(pd.DataFrame(data_rows))
 
-        if st.button("🚀 執行全自動對位"):
+        if st.button("🚀 執行深度對位"):
             results = []
             bar = st.progress(0)
-            for i, r in df.iterrows():
+            for i, r in enumerate(data_rows):
                 info = fetch_dual_strings(r['JapicID'], r['關鍵字'])
                 results.append({
                     "No.": r['No.'],
@@ -136,17 +133,17 @@ if f:
                     "Ingredient (EN)": info["ing_en"],
                     "來源網址": info["url"]
                 })
-                bar.progress((i + 1) / len(df))
-                time.sleep(0.6)
+                bar.progress((i + 1) / len(data_rows))
+                time.sleep(0.5)
             
             res_df = pd.DataFrame(results)
-            st.subheader("📊 最終解析結果")
+            st.subheader("📊 2. 最終解析結果")
             st.dataframe(res_df)
             
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                 res_df.to_excel(writer, index=False)
-            st.download_button("📥 下載 Excel", out.getvalue(), f"PMDA_Final_Fix.xlsx")
+            st.download_button("📥 下載 Excel", out.getvalue(), f"PMDA_Refined_Report.xlsx")
 
     except Exception as e:
-        st.error(f"Excel 讀取失敗: {e}")
+        st.error(f"錯誤: {e}")
