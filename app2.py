@@ -7,30 +7,36 @@ from urllib.parse import quote
 import io
 from bs4 import BeautifulSoup
 
-# 版本標記：2025-12-30 05:00 穩定渲染版
+# 版本標記：2025-12-30 精簡片假名 + 抓取過程透明化版
 
-# 設定頁面最開頭，確保 UI 一定會出現
-st.set_page_config(layout="wide", page_title="PMDA 翻譯工具")
+st.set_page_config(layout="wide", page_title="PMDA 精確解析工具")
 
-def get_katakana_prefix(text):
+def get_pure_katakana(text):
+    """只提取第一個出現的片假名區塊作為關鍵字"""
     if not text or pd.isna(text): return ""
     text = str(text).strip()
+    # 匹配連續的片假名（包含長音符號與中間點）
     match = re.search(r'([ァ-ヶー・]+)', text)
-    return match.group(1) if match else ""
+    return match.group(1) if match else text
 
 def fetch_dual_strings(japic_id, kw_trade):
-    """
-    核心邏輯：分別從兩個不同位置抓取英文字串
-    """
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None", "url": "N/A"}
+    res = {
+        "trade_en": "[未檢出]", 
+        "ing_en": "[未檢出]", 
+        "target_id": "None", 
+        "url": "N/A",
+        "raw_reg_text": ""  # 新增：存儲原始 HTML 內容以便使用者判斷
+    }
     
     try:
-        # 1. ID 處理
-        final_id = str(japic_id).strip().split('.')[0].zfill(8) if japic_id and str(japic_id).lower() != 'none' else None
+        # 1. JapicID 處理：補齊 8 位數
+        final_id = None
+        if japic_id and str(japic_id).lower() != 'none' and str(japic_id).strip() != "":
+            final_id = str(japic_id).split('.')[0].strip().zfill(8)
         
-        # 2. 如果沒 ID，透過搜尋補抓
-        if not final_id or final_id == "0000None":
+        # 2. 如果無 ID，則執行搜尋
+        if not final_id:
             search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw_trade)}"
             r_s = requests.get(search_url, headers=headers, timeout=10)
             codes = re.findall(r'japic_code=(\d+)', r_s.text + r_s.url)
@@ -46,39 +52,32 @@ def fetch_dual_strings(japic_id, kw_trade):
 
             # --- [位置 1] 成分名：欧文一般名 ---
             th_ing = soup.find('th', string=re.compile(r'欧文一般名'))
-            if th_ing:
+            if th_ing and th_ing.find_next_sibling('td'):
                 res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
             # --- [位置 2] 商品名：規制区分 ---
-            # 邏輯：從該格內容中，提取所有英文字串，並取「最後一個」
             th_reg = soup.find('th', string=re.compile(r'規制区分'))
-            if th_reg:
-                td_text = th_reg.find_next_sibling('td').get_text(separator=" ", strip=True)
-                # 抓取包含空格的英文單字 (例如 SCEMBLIX tablets)
-                en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{3,}\b', td_text)
+            if th_reg and th_reg.find_next_sibling('td'):
+                td_node = th_reg.find_next_sibling('td')
+                raw_text = td_node.get_text(separator=" ", strip=True)
+                res["raw_reg_text"] = raw_text # 紀錄原始文字供判斷
+                
+                # 提取最後一段連續英文 (包含空格與劑型)
+                en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{3,}\b', raw_text)
                 if en_matches:
                     res["trade_en"] = en_matches[-1].strip()
     except:
-        pass
+        res["trade_en"] = "[解析異常]"
     return res
 
-# --- UI 介面 ---
-st.title("💊 PMDA 藥品名翻譯 (雙欄位精確版)")
+# --- UI 部分 ---
+st.title("💊 PMDA 雙英文字串精確版")
 
-# 說明文字
-st.markdown("""
-**抓取規則：**
-1. **Ingredient (EN)**: 取自 `欧文一般名` 欄位。
-2. **Trade Name (EN)**: 取自 `規制区分` 欄位中的末尾英文字串。
-""")
-
-f = st.file_uploader("1. 請上傳含有 JapicID 或商品名的 Excel", type=['xlsx'])
+f = st.file_uploader("上傳 Excel", type=['xlsx'])
 
 if f:
     try:
         raw_df = pd.read_excel(f, header=None)
-        
-        # 自動辨識表頭
         header_idx, cols = None, {}
         for i in range(min(20, len(raw_df))):
             row_vals = [str(x) for x in raw_df.iloc[i]]
@@ -89,33 +88,40 @@ if f:
                     if 'No' in val: cols['No'] = idx
                     if any(k in val for k in ['商', '販']): cols['Trade'] = idx
                     if '成' in val: cols['Ing'] = idx
-                    if 'Japic' in val or 'ID' in val: cols['ID'] = idx
+                    if any(k in val for k in ['Japic', 'ID']): cols['ID'] = idx
                 break
         
         if header_idx is not None:
-            # 清洗資料
             data_rows = []
             for _, row in raw_df.iloc[header_idx + 1:].iterrows():
                 no_val = str(row.iloc[cols.get('No', 0)]).strip().replace('.0','')
                 if not no_val.isdigit() and len(data_rows) > 0: break
+                
+                # 取得 JapicID 並處理 None 的顯示
+                raw_id = str(row.iloc[cols.get('ID', -1)]).strip() if 'ID' in cols else "None"
+                display_id = raw_id if raw_id.lower() != 'none' else "[待搜尋]"
+                
+                trade_name_jp = str(row.iloc[cols.get('Trade', 1)]).strip()
                 data_rows.append({
                     "No.": no_val,
-                    "商品名(日)": str(row.iloc[cols.get('Trade', 1)]).strip(),
+                    "商品名(日)": trade_name_jp,
+                    "關鍵字(片假名)": get_pure_katakana(trade_name_jp),
                     "成分名(日)": str(row.iloc[cols.get('Ing', 2)]).strip(),
-                    "JapicID": str(row.iloc[cols.get('ID', -1)]).strip() if 'ID' in cols else "None"
+                    "JapicID": display_id
                 })
             df = pd.DataFrame(data_rows)
-            st.success(f"✅ 辨識成功，共 {len(df)} 筆資料")
+            st.subheader("📋 1. 上傳資料預覽 (關鍵字已精簡)")
             st.dataframe(df, use_container_width=True)
 
-            if st.button("🚀 開始解析"):
+            if st.button("🚀 開始深度解析"):
                 results = []
                 bar = st.progress(0)
                 status = st.empty()
                 
                 for i, r in df.iterrows():
-                    status.text(f"⏳ 正在分析 No.{r['No.']}...")
-                    info = fetch_dual_strings(r['JapicID'], get_katakana_prefix(r['商品名(日)']))
+                    status.text(f"⏳ 正在處理 No.{r['No.']}：{r['關鍵字(片假名)']}...")
+                    # 傳入原始 JapicID 與 關鍵字
+                    info = fetch_dual_strings(r['JapicID'], r['關鍵字(片假名)'])
                     
                     results.append({
                         "No.": r['No.'],
@@ -124,24 +130,21 @@ if f:
                         "Trade Name (EN)": info["trade_en"],
                         "成分名(日)": r['成分名(日)'],
                         "Ingredient (EN)": info["ing_en"],
+                        "從[規制区分]抓到的原始內容": info["raw_reg_text"], # 供您判斷
                         "來源網址": info["url"]
                     })
                     bar.progress((i + 1) / len(df))
                     time.sleep(1.0)
                 
                 res_df = pd.DataFrame(results)
-                st.subheader("📊 解析結果")
+                st.subheader("📊 2. 最終解析結果")
                 st.dataframe(res_df, use_container_width=True)
                 
-                # 下載
                 out = io.BytesIO()
                 with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                     res_df.to_excel(writer, index=False)
-                st.download_button("📥 下載 Excel 報告", out.getvalue(), "PMDA_Result.xlsx")
+                st.download_button("📥 下載 Excel", out.getvalue(), "PMDA_Deep_Analysis.xlsx")
         else:
-            st.error("❌ 無法辨識 Excel 表頭，請確認欄位包含『商品名』與『成分名』。")
-            
+            st.error("❌ 找不到表頭。")
     except Exception as e:
-        st.error(f"發生錯誤: {e}")
-else:
-    st.info("請上傳檔案以開始。")
+        st.error(f"錯誤: {e}")
