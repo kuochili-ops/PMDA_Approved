@@ -8,11 +8,20 @@ import io
 from bs4 import BeautifulSoup
 from datetime import datetime
 
-# --- 版本資訊 ---
+# --- 版本資訊 (手動更新標記) ---
 VERSION_DATE = "2025-12-30"
-VERSION_TIME = "22:15" # 台北時間
+VERSION_TIME = "22:15" 
 
 st.set_page_config(layout="wide", page_title=f"PMDA Tool {VERSION_DATE}")
+
+# --- UI 頂部註記 (開啟 App 即可見) ---
+st.title("💊 PMDA 雙英文字串精確對位版")
+st.markdown(f"""
+> **版本更新紀錄** > 📅 更新日期：`{VERSION_DATE}`  
+> ⏰ 更新時間：`{VERSION_TIME}`  
+> 🛠️ 核心功能：強化 Scemblix 欄位模糊對位、片假名關鍵字提取
+""")
+st.divider()
 
 def get_pure_katakana(text):
     if not text or pd.isna(text): return ""
@@ -25,7 +34,7 @@ def fetch_dual_strings(japic_id_input, kw_trade):
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None", "url": "N/A", "raw_reg_text": ""}
     
     try:
-        # 1. ID 處理與搜尋
+        # 1. ID 處理與搜尋邏輯
         final_id = re.sub(r'[^0-9]', '', str(japic_id_input))
         if not (final_id and len(final_id) >= 5):
             search_url = f"https://www.kegg.jp/medicus-bin/search_drug?search_keyword={quote(kw_trade)}"
@@ -46,14 +55,13 @@ def fetch_dual_strings(japic_id_input, kw_trade):
             if th_ing and th_ing.find_next_sibling('td'):
                 res["ing_en"] = th_ing.find_next_sibling('td').get_text(strip=True)
 
-            # --- 3. 商品名定位 (強化模糊匹配) ---
-            # 針對 Scemblix 等案例，擴大搜尋範圍：不只找 th，也找文字包含「規制」或「販売」的區域
-            # 使用 lambda 函數進行更靈活的標籤過濾
+            # --- 3. 商品名定位 (強化模糊標籤遍歷) ---
             target_td = None
             th_tags = soup.find_all('th')
             for th in th_tags:
                 txt = th.get_text()
-                if '規制' in txt or '区分' in txt or '販売名' in txt:
+                # 模糊匹配：只要標題包含關鍵字
+                if '規制' in txt or '区分' in txt or '販売名' in txt or '商標' in txt:
                     target_td = th.find_next_sibling('td')
                     if target_td: break
             
@@ -61,8 +69,7 @@ def fetch_dual_strings(japic_id_input, kw_trade):
                 raw_text = target_td.get_text(separator=" ", strip=True)
                 res["raw_reg_text"] = raw_text
                 
-                # 抓取最後一段英文 (Trade Name)
-                # 規則：大寫開頭，允許空格、連字號、點
+                # 抓取最後一段大寫開頭英文
                 en_matches = re.findall(r'\b[A-Z][A-Za-z0-9\s\-\.]{3,}\b', raw_text)
                 if en_matches:
                     res["trade_en"] = en_matches[-1].strip()
@@ -72,11 +79,7 @@ def fetch_dual_strings(japic_id_input, kw_trade):
         
     return res
 
-# --- UI 介面 ---
-st.title("💊 PMDA 雙英文字串精確對位版")
-st.caption(f"🚀 最後更新日期：{VERSION_DATE} | 時間：{VERSION_TIME}")
-st.divider()
-
+# --- 主程式邏輯 ---
 f = st.file_uploader("1. 請上傳包含 JapicID 或商品名的 Excel", type=['xlsx'])
 
 if f:
