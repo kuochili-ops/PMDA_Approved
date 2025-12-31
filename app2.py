@@ -8,9 +8,9 @@ import io
 from bs4 import BeautifulSoup
 
 # --- 1. 設定區域：請填入您的 Azure 資訊 ---
-AZURE_KEY = "您的_Azure_Key"
+AZURE_KEY = "9JDF24qrsW8rXiYmChS17yEPyNRI96nNXXqEKn5CyI6ql6iYcTOFJQQJ99BLAC3pKaRXJ3w3AAAbACOGVYVU"
 AZURE_ENDPOINT = "https://api.cognitive.microsofttranslator.com"
-AZURE_REGION = "您的區域(例如: japaneast 或 global)"
+AZURE_REGION = "eastasia"
 
 # --- 2. 核心功能函式 ---
 
