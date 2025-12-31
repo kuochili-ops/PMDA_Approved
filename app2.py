@@ -8,9 +8,9 @@ import io
 from bs4 import BeautifulSoup
 
 # --- Azure 翻譯設定 (請務必填寫) ---
-AZURE_KEY = "您的_Azure_Key"
+AZURE_KEY = "9JDF24qrsW8rXiYmChS17yEPyNRI96nNXXqEKn5CyI6ql6iYcTOFJQQJ99BLAC3pKaRXJ3w3AAAbACOGVYVU"
 AZURE_ENDPOINT = "https://api.cognitive.microsofttranslator.com/"
-AZURE_REGION = "您的區域"
+AZURE_REGION = "eastasia"
 
 def translate_to_en(text):
     if pd.isna(text) or not str(text).strip(): return ""
