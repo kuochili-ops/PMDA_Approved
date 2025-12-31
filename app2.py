@@ -93,8 +93,8 @@ def fetch_japic_data(trade_jp_full):
 
 # --- 3. Streamlit UI ---
 
-st.set_page_config(layout="wide", page_title="𓃥 白 六 PMDA 上市品解析工具")
-st.title("𓃥 白 六 PMDA 上市品解析工具")
+st.set_page_config(layout="wide", page_title="𓃥 白 六 PMDA 核可上市品解析工具")
+st.title("𓃥 白 六 PMDA 核可上市品解析工具")
 
 f = st.file_uploader("請上傳 PMDA 原始 Excel 檔案 (.xlsx)", type=['xlsx'])
 
