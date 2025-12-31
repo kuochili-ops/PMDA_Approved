@@ -29,7 +29,7 @@ def fetch_data_by_katakana(trade_jp_full):
     headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     res = {"trade_en": "[未檢出]", "ing_en": "[未檢出]", "target_id": "None"}
     
-    # 提取片假名核心藥名
+    # 核心：只抓取最前面的片假名作為 Japic 搜尋關鍵字
     raw_clean = re.split(r'[\(\n\s（]', str(trade_jp_full))[0].strip()
     katakana_match = re.match(r'^[\u30A0-\u30FF\u30FB\u30FC]+', raw_clean)
     search_keyword = katakana_match.group(0) if katakana_match else raw_clean
@@ -44,7 +44,7 @@ def fetch_data_by_katakana(trade_jp_full):
         if codes:
             jid = codes[0].zfill(8)
             res["target_id"] = jid
-            # 抓英文商標
+            # 抓 Trade Name (EN)
             rt = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med_product?id={jid}", headers=headers)
             rt.encoding = rt.apparent_encoding
             t_text = BeautifulSoup(rt.text, 'html.parser').get_text(separator=" ", strip=True)
@@ -52,7 +52,7 @@ def fetch_data_by_katakana(trade_jp_full):
                 after = t_text.split("欧文商標名")[-1].strip()
                 m = re.search(r'\b([A-Z][A-Za-z0-9\s\-\.\/]{2,})\b', after)
                 if m: res["trade_en"] = re.split(r'[^\x00-\x7F]+', m.group(1))[0].strip()
-            # 抓英文成分
+            # 抓 Ingredient (EN)
             ri = requests.get(f"https://www.kegg.jp/medicus-bin/japic_med?japic_code={jid}", headers=headers)
             ri.encoding = ri.apparent_encoding
             si = BeautifulSoup(ri.text, 'html.parser')
@@ -62,19 +62,19 @@ def fetch_data_by_katakana(trade_jp_full):
     except: pass
     return res
 
-st.title("💊 PMDA 萬能解析器 (新藥/變更識別版)")
+st.title("💊 PMDA 深度解析系統 (12月強化與適應症翻譯)")
 
-f = st.file_uploader("上傳原始 Excel", type=['xlsx'])
+f = st.file_uploader("上傳 PMDA 原始 Excel (xlsx)", type=['xlsx'])
 
 if f:
     xl = pd.ExcelFile(f)
     s_names = xl.sheet_names
-    selected_sheet = st.selectbox("請選擇分頁 (例如 12 月)：", s_names, index=len(s_names)-1)
+    selected_sheet = st.selectbox("請選擇分頁：", s_names, index=len(s_names)-1)
     
     if st.button("開始解析"):
         df_raw = pd.read_excel(f, sheet_name=selected_sheet, header=None)
         
-        # 欄位定位
+        # 欄位動態定位
         h_idx, t_col, n_col, ind_col, status_col = -1, -1, -1, -1, -1
         for i in range(min(20, len(df_raw))):
             row_str = [str(x) for x in df_raw.iloc[i]]
@@ -83,7 +83,7 @@ if f:
                 for idx, v in enumerate(row_str):
                     if '販' in v: t_col = idx
                     if 'No' in v: n_col = idx
-                    if '效' in v or '效能' in v or '效果' in v: ind_col = idx
+                    if '効能' in v or '效果' in v: ind_col = idx
                     if '承認' in v and idx != t_col: status_col = idx
                 break
 
@@ -96,17 +96,18 @@ if f:
                 no_str = str(row.iloc[n_col]).split('.')[0] if n_col != -1 else ""
                 if not no_str.isdigit(): continue
                 
-                # A. 識別新藥或變更
+                # 1. 識別：新藥 (承 認) vs 變更 (一変/二変)
                 raw_status = str(row.iloc[status_col]).strip() if status_col != -1 else ""
-                status_label = "新藥" if "承" in raw_status and "認" in raw_status else "變更"
+                # 判斷邏輯：只要字串包含 '承' 與 '認' 就是新藥，其餘為變更
+                status_label = "新藥" if ("承" in raw_status and "認" in raw_status) else "變更"
                 
-                # B. 片假名核心搜尋
+                # 2. 抓取 Japic 資料 (片假名核心模式)
                 jp_name = str(row.iloc[t_col]).strip()
                 info = fetch_data_by_katakana(jp_name)
                 
-                # C. Azure 翻譯適應症
-                jp_ind = str(row.iloc[ind_col]).strip() if ind_col != -1 else ""
-                en_ind = translate_to_en(jp_ind)
+                # 3. 處理適應症與翻譯
+                jp_indication = str(row.iloc[ind_col]).strip() if ind_col != -1 else ""
+                en_indication = translate_to_en(jp_indication)
                 
                 results.append({
                     "No.": no_str,
@@ -115,15 +116,19 @@ if f:
                     "JapicID": info["target_id"],
                     "Trade Name (EN)": info["trade_en"],
                     "Ingredient (EN)": info["ing_en"],
-                    "Indication (EN)": en_ind
+                    "Indication (EN)": en_indication,
+                    "適應症原文 (日)": jp_indication
                 })
                 bar.progress((i+1)/len(valid_rows))
                 time.sleep(0.6)
             
             final_df = pd.DataFrame(results)
+            st.success(f"『{selected_sheet}』解析完成！")
             st.dataframe(final_df)
             
             out = io.BytesIO()
             with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
                 final_df.to_excel(writer, index=False)
-            st.download_button("📥 下載最終解析成果", out.getvalue(), "PMDA_Final_Report.xlsx")
+            st.download_button("📥 下載解析成果報告", out.getvalue(), f"PMDA_{selected_sheet}_Final.xlsx")
+        else:
+            st.error("找不到欄位標題，請確認分頁格式。")
